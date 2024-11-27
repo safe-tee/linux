@@ -36,6 +36,7 @@
 #include "svm_ops.h"
 #include "cpuid.h"
 #include "trace.h"
+#include "lapic.h"
 
 #define GHCB_VERSION_MAX	2ULL
 #define GHCB_VERSION_MIN	1ULL
@@ -3536,6 +3537,8 @@ static bool sev_es_are_required_ghcb_fields_valid(struct vcpu_svm *svm)
 		return kvm_ghcb_sw_scratch_is_valid(svm);
 	case SVM_VMGEXIT_HVDB_PAGE:
 		return is_sev_snp_guest(vcpu);
+	case SVM_VMGEXIT_HV_IPI:
+		return sev_snp_guest(vcpu->kvm);
 	default:
 		return true;
 	}
@@ -4464,6 +4467,22 @@ static int sev_snp_hv_doorbell_page(struct vcpu_svm *svm)
 	return 0;
 }
 
+static int sev_snp_hv_ipi(struct vcpu_svm *svm)
+{
+	struct kvm_vcpu *vcpu = &svm->vcpu;
+	u64 icr_info;
+
+	if (!sev_snp_guest(vcpu->kvm))
+		return -EINVAL;
+
+	icr_info = svm->vmcb->control.exit_info_1;
+
+	if (kvm_xapic_x2apic_send_ipi(vcpu, icr_info))
+		return -EINVAL;
+
+	return 0;
+}
+
 static int sev_handle_vmgexit_msr_protocol(struct vcpu_svm *svm)
 {
 	struct vmcb_control_area *control = &svm->vmcb->control;
@@ -4800,6 +4819,10 @@ int sev_handle_vmgexit(struct kvm_vcpu *vcpu)
 						control->exit_info_2);
 	case SVM_VMGEXIT_HVDB_PAGE:
 		if (sev_snp_hv_doorbell_page(svm))
+			svm_vmgexit_bad_input(svm, GHCB_ERR_INVALID_INPUT);
+		return 1;
+	case SVM_VMGEXIT_HV_IPI:
+		if (sev_snp_hv_ipi(svm))
 			svm_vmgexit_bad_input(svm, GHCB_ERR_INVALID_INPUT);
 		return 1;
 	case SVM_VMGEXIT_UNSUPPORTED_EVENT:
