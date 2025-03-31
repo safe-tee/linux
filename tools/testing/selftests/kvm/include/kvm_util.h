@@ -77,6 +77,20 @@ struct kvm_vcpu {
 	u32 dirty_gfns_count;
 };
 
+struct kvm_plane {
+	struct list_head list;
+	uint32_t id;
+	int fd;
+	struct kvm_vm *vm;
+};
+
+struct kvm_plane_vcpu {
+	struct list_head list;
+	uint32_t id;
+	int fd;
+	struct kvm_vcpu *plane0;
+};
+
 struct userspace_mem_regions {
 	struct rb_root gpa_tree;
 	struct rb_root hva_tree;
@@ -144,6 +158,8 @@ struct kvm_vm {
 	unsigned int va_bits;
 	u64 max_gfn;
 	struct list_head vcpus;
+	struct list_head planes;
+	struct list_head plane_vcpus;
 	struct userspace_mem_regions regions;
 	struct sparsebit *vpages_valid;
 	struct sparsebit *vpages_mapped;
@@ -419,6 +435,21 @@ do {											\
 	__TEST_ASSERT_VM_VCPU_IOCTL(!ret, #cmd, ret, vm);		\
 })
 
+static __always_inline void static_assert_is_plane(struct kvm_plane *plane) { }
+
+#define __plane_ioctl(plane, cmd, arg)				\
+({								\
+	static_assert_is_plane(plane);				\
+	kvm_do_ioctl((plane)->fd, cmd, arg);			\
+})
+
+#define plane_ioctl(plane, cmd, arg)				\
+({								\
+	int ret = __plane_ioctl(plane, cmd, arg);		\
+								\
+	__TEST_ASSERT_VM_VCPU_IOCTL(!ret, #cmd, ret, (plane)->vm); \
+})
+
 static __always_inline void static_assert_is_vcpu(struct kvm_vcpu *vcpu) { }
 
 #define __vcpu_ioctl(vcpu, cmd, arg)				\
@@ -442,6 +473,21 @@ static __always_inline void static_assert_is_vcpu(struct kvm_vcpu *vcpu) { }
 	int ret = __gmem_ioctl(gmem_fd, cmd, arg);		\
 								\
 	TEST_ASSERT(!ret, __KVM_IOCTL_ERROR(#cmd, ret));	\
+})
+
+static __always_inline void static_assert_is_plane_vcpu(struct kvm_plane_vcpu *plane_vcpu) { }
+
+#define __plane_vcpu_ioctl(plane_vcpu, cmd, arg)		\
+({								\
+	static_assert_is_plane_vcpu(plane_vcpu);		\
+	kvm_do_ioctl((plane_vcpu)->fd, cmd, arg);		\
+})
+
+#define plane_vcpu_ioctl(plane_vcpu, cmd, arg)			\
+({								\
+	int ret = __plane_vcpu_ioctl(plane_vcpu, cmd, arg);	\
+								\
+	__TEST_ASSERT_VM_VCPU_IOCTL(!ret, #cmd, ret, (plane_vcpu)->plane0->vm); \
 })
 
 /*
@@ -889,6 +935,8 @@ void vm_mem_region_reload(struct kvm_vm *vm, u32 slot);
 void vm_mem_region_move(struct kvm_vm *vm, u32 slot, u64 new_gpa);
 void vm_mem_region_delete(struct kvm_vm *vm, u32 slot);
 struct kvm_vcpu *__vm_vcpu_add(struct kvm_vm *vm, u32 vcpu_id);
+struct kvm_plane *vm_plane_add(struct kvm_vm *vm, int plane_id);
+struct kvm_plane_vcpu *__vm_plane_vcpu_add(struct kvm_vcpu *vcpu, struct kvm_plane *plane);
 void vm_populate_gva_bitmap(struct kvm_vm *vm);
 gva_t vm_unused_gva_gap(struct kvm_vm *vm, size_t sz, gva_t min_gva);
 gva_t vm_alloc(struct kvm_vm *vm, size_t sz, gva_t min_gva);
@@ -1234,6 +1282,18 @@ struct kvm_vm *__vm_create(struct vm_shape shape, u32 nr_runnable_vcpus,
 static inline struct kvm_vm *vm_create_barebones(void)
 {
 	return ____vm_create(VM_SHAPE_DEFAULT);
+}
+
+static inline struct kvm_vm *vm_create_barebones_irqchip(bool split)
+{
+	struct kvm_vm *vm = vm_create_barebones();
+
+	if (split)
+		vm_enable_cap(vm, KVM_CAP_SPLIT_IRQCHIP, 24);
+	else
+		vm_create_irqchip(vm);
+
+	return vm;
 }
 
 static inline struct kvm_vm *vm_create_barebones_type(unsigned long type)

@@ -1212,6 +1212,7 @@ static inline void vcpu_clear_cpuid_feature(struct kvm_vcpu *vcpu,
 
 u64 vcpu_get_msr(struct kvm_vcpu *vcpu, u64 msr_index);
 int _vcpu_set_msr(struct kvm_vcpu *vcpu, u64 msr_index, u64 msr_value);
+int _plane_vcpu_set_msr(struct kvm_plane_vcpu *plane_vcpu, u64 msr_index, u64 msr_value);
 
 /*
  * Assert on an MSR access(es) and pretty print the MSR name when possible.
