@@ -754,6 +754,11 @@ struct kvm_memslots {
 	int node_idx;
 };
 
+struct kvm_plane {
+	struct kvm *kvm;
+	unsigned level;
+};
+
 struct kvm {
 #ifdef KVM_HAVE_MMU_RWLOCK
 	rwlock_t mmu_lock;
@@ -798,6 +803,8 @@ struct kvm {
 	/* For management / invalidation of gfn_to_pfn_caches */
 	spinlock_t gpc_lock;
 	struct list_head gpc_list;
+
+	struct kvm_plane *planes[KVM_MAX_PLANES];
 
 	/*
 	 * created_vcpus is protected by kvm->lock, and is incremented
