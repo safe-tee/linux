@@ -432,7 +432,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 	kernel_fpu_begin(&fpu_save, KERNEL_FPC | KERNEL_VXR);
 	load_vx_regs((vcpu->arch.ctxt.vregs));
 
-	if (!vcpu->wants_to_run) {
+	if (!kvm_vcpu_wants_to_run(vcpu)) {
 		ret = -EINTR;
 		goto out;
 	}
