@@ -352,6 +352,8 @@ struct kvm_vcpu_common {
 
 	struct pid *pid;
 	rwlock_t pid_lock;
+	int sigset_active;
+	sigset_t sigset;
 
 	/* Scheduling state */
 #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -375,8 +377,6 @@ struct kvm_vcpu {
 
 	struct kvm_run *run;
 
-	int sigset_active;
-	sigset_t sigset;
 	unsigned int halt_poll_ns;
 
 	u64 plane_requests;
