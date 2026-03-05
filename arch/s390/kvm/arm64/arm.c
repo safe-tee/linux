@@ -461,11 +461,11 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		 * any pending kick is visible before we decide to enter the
 		 * guest.
 		 */
-		smp_store_mb(vcpu->mode, IN_GUEST_MODE);
+		kvm_vcpu_set_mode_mb(vcpu, IN_GUEST_MODE);
 
 		if (ret <= 0 || kvm_request_pending(vcpu) ||
 		    xfer_to_guest_mode_work_pending()) {
-			vcpu->mode = OUTSIDE_GUEST_MODE;
+			kvm_vcpu_set_mode(vcpu, OUTSIDE_GUEST_MODE);
 			local_irq_enable();
 			continue;
 		}
@@ -476,7 +476,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 
 		arm_vcpu_enter_exit(virt_to_phys(&vcpu->arch.sae_block));
 
-		vcpu->mode = OUTSIDE_GUEST_MODE;
+		kvm_vcpu_set_mode(vcpu, OUTSIDE_GUEST_MODE);
 		vcpu->stat.exits++;
 
 		local_irq_enable();
