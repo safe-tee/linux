@@ -497,6 +497,10 @@ static int kvm_vcpu_init_common(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned
 			goto out_drop_counter;
 	}
 
+	r = kvm_arch_vcpu_common_init(common);
+	if (r)
+		goto out_free_dirty_ring;
+
 	vcpu->common = no_free_ptr(common);
 
 	kvm_vcpu_set_in_spin_loop(vcpu, false);
@@ -504,6 +508,8 @@ static int kvm_vcpu_init_common(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned
 
 	return 0;
 
+out_free_dirty_ring:
+	kvm_dirty_ring_free(&common->dirty_ring);
 out_drop_counter:
 	kvm->created_vcpus--;
 
@@ -550,6 +556,8 @@ static void kvm_vcpu_common_destroy(struct kvm_vcpu *vcpu)
 	       return;
 
 	kvm->created_vcpus--;
+
+	kvm_arch_vcpu_common_destroy(common);
 
 	/*
 	 * No need for rcu_read_lock as VCPU_RUN is the only place that changes

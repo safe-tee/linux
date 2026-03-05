@@ -379,6 +379,8 @@ struct kvm_vcpu_common {
 	bool scheduled_out;
 
 	struct kvm_dirty_ring dirty_ring;
+
+	struct kvm_vcpu_arch_common arch;
 };
 
 struct kvm_vcpu {

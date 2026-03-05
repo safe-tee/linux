@@ -20,6 +20,11 @@ static inline int kvm_arch_plane_init(struct kvm *kvm,
 
 static inline void kvm_arch_plane_destroy(struct kvm_plane *plane) {}
 
+struct kvm_vcpu_arch_common {};
+
+static inline int kvm_arch_vcpu_common_init(struct kvm_vcpu_common *common) { return 0; }
+static inline void kvm_arch_vcpu_common_destroy(struct kvm_vcpu_common *common) {}
+
 #define PGM_OPERATION			0x01
 #define PGM_PRIVILEGED_OP		0x02
 #define PGM_EXECUTE			0x03
