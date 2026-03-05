@@ -834,6 +834,8 @@ struct kvm_plane {
 
 	/* Per-Plane VCPU array */
 	struct xarray vcpu_array;
+
+	struct kvm_arch_plane arch;
 };
 
 struct kvm {
