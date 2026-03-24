@@ -104,6 +104,11 @@ static int kvm_vm_type_ipa_size_shift(unsigned long type)
 	return phys_shift;
 }
 
+unsigned kvm_arch_max_planes(struct kvm *kvm)
+{
+	return 1;
+}
+
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 {
 	char debug_name[32];

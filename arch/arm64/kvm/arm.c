@@ -235,6 +235,11 @@ static int kvm_init_vm_flavor(struct kvm *kvm, unsigned long type)
 	return 0;
 }
 
+unsigned kvm_arch_max_planes(struct kvm *kvm)
+{
+	return 1;
+}
+
 /**
  * kvm_arch_init_vm - initializes a VM data structure
  * @kvm:	pointer to the KVM struct
