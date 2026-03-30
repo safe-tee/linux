@@ -447,18 +447,54 @@ void *kvm_mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
 }
 #endif
 
-static int kvm_vcpu_init_common(struct kvm_vcpu *vcpu, struct kvm *kvm)
+static int kvm_vcpu_init_common(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned long id)
 {
-	struct kvm_vcpu_common *common = kzalloc(sizeof(*common), GFP_KERNEL_ACCOUNT);
+	struct kvm_vcpu_common *common __free(kfree) = kzalloc(sizeof(*common), GFP_KERNEL_ACCOUNT);
+	int r;
 
-	if (common == NULL)
-		return -ENOMEM;
+	/*
+	 * KVM tracks vCPU IDs as 'int', be kind to userspace and reject
+	 * too-large values instead of silently truncating.
+	 *
+	 * Ensure KVM_MAX_VCPU_IDS isn't pushed above INT_MAX without first
+	 * changing the storage type (at the very least, IDs should be tracked
+	 * as unsigned ints).
+	 */
+	BUILD_BUG_ON(KVM_MAX_VCPU_IDS > INT_MAX);
+	if (id >= KVM_MAX_VCPU_IDS)
+		return -EINVAL;
+
+	kvm->created_vcpus++;
+
+	if (common == NULL) {
+		r = -ENOMEM;
+		goto out_drop_counter;
+	}
+
+	common->vcpu_idx = atomic_read(&kvm->online_vcpus);
 
 	common->kvm = kvm;
 	common->current_vcpu = vcpu;
-	vcpu->common = common;
+	vcpu->common = no_free_ptr(common);
 
 	return 0;
+
+out_drop_counter:
+	kvm->created_vcpus--;
+
+	return r;
+}
+
+static void kvm_vcpu_finish_common(struct kvm_vcpu *vcpu)
+{
+	smp_wmb();
+	if (vcpu->plane_level == 0) {
+		/*
+		 * Pairs with smp_rmb() in kvm_get_vcpu.  Store the vcpu
+		 * pointer before kvm->online_vcpu's incremented value.
+		 */
+		atomic_inc(&vcpu->kvm->online_vcpus);
+	}
 }
 
 static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
@@ -491,10 +527,17 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 
 static void kvm_vcpu_common_destroy(struct kvm_vcpu *vcpu)
 {
-	if (vcpu->plane_level == 0)
-		kfree(vcpu->common);
+	struct kvm_vcpu_common *common = vcpu->common;
+	struct kvm *kvm = common->kvm;
 
 	vcpu->common = NULL;
+
+	if (vcpu->plane_level != 0)
+	       return;
+
+	kvm->created_vcpus--;
+
+	kfree(common);
 }
 
 static void kvm_vcpu_destroy(struct kvm_vcpu *vcpu)
@@ -4336,7 +4379,7 @@ static void kvm_create_vcpu_debugfs(struct kvm_vcpu *vcpu)
  */
 static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 {
-	int r;
+	int r = -EINVAL;
 	struct kvm_vcpu *vcpu;
 	struct page *page;
 
@@ -4364,17 +4407,13 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	if (r)
 		return r;
 
-	kvm->created_vcpus++;
-
 	vcpu = kmem_cache_zalloc(kvm_vcpu_cache, GFP_KERNEL_ACCOUNT);
-	if (!vcpu) {
-		r = -ENOMEM;
-		goto vcpu_decrement;
-	}
+	if (!vcpu)
+		return -ENOMEM;
 
 	vcpu->vcpu_idx = -1;
 
-	r = kvm_vcpu_init_common(vcpu, kvm);
+	r = kvm_vcpu_init_common(vcpu, kvm, id);
 	if (r)
 		goto vcpu_free;
 
@@ -4404,7 +4443,7 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	 * Unwind the index back to -1 on failure so that KVM can use the index
 	 * to detect that the vCPU is unreachable, e.g. for lockdep asserts.
 	 */
-	vcpu->vcpu_idx = atomic_read(&kvm->online_vcpus);
+	vcpu->vcpu_idx = vcpu->common->vcpu_idx;
 	r = xa_insert(&kvm->planes[0]->vcpu_array, vcpu->vcpu_idx, vcpu, GFP_KERNEL_ACCOUNT);
 	WARN_ON_ONCE(r == -EBUSY);
 	if (r)
@@ -4424,12 +4463,7 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	if (r < 0)
 		goto kvm_put_xa_erase;
 
-	/*
-	 * Pairs with smp_rmb() in kvm_get_vcpu.  Store the vcpu
-	 * pointer before kvm->online_vcpu's incremented value.
-	 */
-	smp_wmb();
-	atomic_inc(&kvm->online_vcpus);
+	kvm_vcpu_finish_common(vcpu);
 	mutex_unlock(&vcpu->mutex);
 
 	kvm_arch_vcpu_postcreate(vcpu);
@@ -4451,8 +4485,6 @@ vcpu_free_common:
 	kvm_vcpu_common_destroy(vcpu);
 vcpu_free:
 	kmem_cache_free(kvm_vcpu_cache, vcpu);
-vcpu_decrement:
-	kvm->created_vcpus--;
 	return r;
 }
 
