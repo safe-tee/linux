@@ -746,6 +746,11 @@ int kvm_cpu_has_pending_timer(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
+bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
+{
+	return false;
+}
+
 long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
 				  unsigned long arg)
 {

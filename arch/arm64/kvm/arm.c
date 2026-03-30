@@ -2026,6 +2026,11 @@ static long pkvm_filter_vcpu_ioctl(struct kvm_vcpu *vcpu, unsigned int ioctl)
 	return 0;
 }
 
+bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
+{
+	return false;
+}
+
 long kvm_arch_vcpu_ioctl(struct file *filp,
 			 unsigned int ioctl, unsigned long arg)
 {
