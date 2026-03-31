@@ -172,6 +172,7 @@ static inline bool kvm_is_error_gpa(gpa_t gpa)
 #define KVM_REQ_VM_DEAD			(1 | KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
 #define KVM_REQ_UNBLOCK			2
 #define KVM_REQ_DIRTY_RING_SOFT_FULL	3
+#define KVM_REQ_PLANE_RESCHED		4
 #define KVM_REQUEST_ARCH_BASE		8
 
 /*
@@ -328,6 +329,8 @@ struct kvm_mmio_fragment {
 	unsigned int len;
 };
 
+
+
 struct kvm_vcpu_common {
 	struct kvm *kvm;
 
@@ -385,12 +388,20 @@ struct kvm_vcpu_common {
 
 	struct kvm_dirty_ring dirty_ring;
 
+	bool plane_switch;
+
 	struct kvm_vcpu_arch_common arch;
 };
 
 #define vcpu_for_each_plane(common, i, v)			\
 	for ((i) = 0; (i) < KVM_MAX_PLANES; ++(i))		\
 		if (((v) = common->vcpus[(i)]) != NULL)
+
+/* Tracked per plane-VCPU - used for deciding which plane-vcpu to run */
+enum kvm_vcpu_state {
+	STOPPED,
+	RUNNABLE,
+};
 
 struct kvm_vcpu {
 	struct kvm *kvm;
@@ -405,6 +416,7 @@ struct kvm_vcpu {
 	struct kvm_run *run;
 
 	u64 plane_requests;
+	enum kvm_vcpu_state plane_state;
 
 	/* S390 only */
 	bool valid_wakeup;
@@ -443,6 +455,10 @@ struct kvm_vcpu {
 	struct kvm_vcpu_common *common;
 	unsigned plane_level;
 };
+
+void kvm_vcpu_set_plane_runnable(struct kvm_vcpu *vcpu);
+void kvm_vcpu_set_plane_stopped(struct kvm_vcpu *vcpu);
+struct kvm_vcpu *kvm_vcpu_select_plane(struct kvm_vcpu *vcpu);
 
 static inline bool kvm_vcpu_wants_to_run(struct kvm_vcpu *vcpu)
 {
