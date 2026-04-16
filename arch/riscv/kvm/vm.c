@@ -138,6 +138,7 @@ int kvm_set_routing_entry(struct kvm *kvm,
 		e->msi.data = ue->u.msi.data;
 		e->msi.flags = ue->flags;
 		e->msi.devid = ue->u.msi.devid;
+		e->msi.plane_level = 0;
 		break;
 	default:
 		goto out;
