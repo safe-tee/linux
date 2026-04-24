@@ -834,6 +834,15 @@ static void vt_cancel_hv_timer(struct kvm_vcpu *vcpu)
 	vmx_cancel_hv_timer(vcpu);
 }
 
+static int vt_mce_allowed(struct kvm_vcpu *vcpu)
+{
+	if (is_td_vcpu(vcpu))
+		return 0;
+
+	return vmx_mce_allowed(vcpu);
+}
+
+
 static void vt_setup_mce(struct kvm_vcpu *vcpu)
 {
 	if (is_td_vcpu(vcpu))
@@ -1074,6 +1083,7 @@ struct kvm_x86_ops vt_x86_ops __initdata = {
 	.cancel_injection = vt_op(cancel_injection),
 	.interrupt_allowed = vt_op(interrupt_allowed),
 	.nmi_allowed = vt_op(nmi_allowed),
+	.mce_allowed = vt_op(mce_allowed),
 	.get_nmi_mask = vt_op(get_nmi_mask),
 	.set_nmi_mask = vt_op(set_nmi_mask),
 	.clear_hlt = vt_op(clear_hlt),
