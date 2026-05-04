@@ -5495,6 +5495,23 @@ static void *svm_alloc_apic_backing_page(struct kvm_vcpu *vcpu)
 	return page_address(page);
 }
 
+static struct kvm_plane *svm_alloc_plane(void)
+{
+	struct kvm_svm_plane *svm_plane = kzalloc(sizeof(*svm_plane), GFP_KERNEL_ACCOUNT);
+
+	if (svm_plane)
+		return &svm_plane->plane;
+
+	return NULL;
+}
+
+static void svm_free_plane(struct kvm_plane *plane)
+{
+	struct kvm_svm_plane *svm_plane = to_kvm_svm_plane(plane);
+
+	kfree(svm_plane);
+}
+
 struct kvm_x86_ops svm_x86_ops __initdata = {
 	.name = KBUILD_MODNAME,
 
@@ -5641,8 +5658,8 @@ struct kvm_x86_ops svm_x86_ops __initdata = {
 	.vcpu_get_apicv_inhibit_reasons = avic_vcpu_get_apicv_inhibit_reasons,
 	.alloc_apic_backing_page = svm_alloc_apic_backing_page,
 
-	.alloc_plane = x86_alloc_plane,
-	.free_plane = x86_free_plane,
+	.alloc_plane = svm_alloc_plane,
+	.free_plane = svm_free_plane,
 	.max_planes = kvm_x86_default_max_planes,
 };
 
