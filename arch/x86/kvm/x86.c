@@ -317,6 +317,19 @@ unsigned kvm_arch_max_planes(struct kvm *kvm)
 	return 1;
 }
 
+struct kvm_plane *kvm_alloc_plane(void)
+{
+	/* For better type checking, do not return kzalloc() value directly */
+	struct kvm_plane *plane = kzalloc(sizeof(*plane), GFP_KERNEL_ACCOUNT);
+
+	return plane;
+}
+
+void kvm_free_plane(struct kvm_plane *plane)
+{
+	kfree(plane);
+}
+
 static struct kmem_cache *kvm_alloc_emulator_cache(void)
 {
 	unsigned int useroffset = offsetof(struct x86_emulate_ctxt, src);

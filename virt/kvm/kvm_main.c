@@ -1222,7 +1222,7 @@ static void kvm_disable_virtualization(void);
 
 static struct kvm_plane *kvm_create_plane(struct kvm *kvm, unsigned plane_level)
 {
-	struct kvm_plane *plane = kzalloc(sizeof(*plane), GFP_KERNEL_ACCOUNT);
+	struct kvm_plane *plane = kvm_alloc_plane();
 
 	if (!plane)
 		return NULL;
@@ -1240,7 +1240,7 @@ static struct kvm_plane *kvm_create_plane(struct kvm *kvm, unsigned plane_level)
 	return plane;
 
 out_free_plane:
-	kfree(plane);
+	kvm_free_plane(plane);
 
 	return NULL;
 }
@@ -1248,7 +1248,7 @@ out_free_plane:
 static void kvm_destroy_one_plane(struct kvm_plane *plane)
 {
 	kvm_arch_plane_destroy(plane);
-	kfree(plane);
+	kvm_free_plane(plane);
 }
 
 static void kvm_destroy_planes(struct kvm *kvm)

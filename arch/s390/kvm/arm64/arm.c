@@ -109,6 +109,16 @@ unsigned kvm_arch_max_planes(struct kvm *kvm)
 	return 1;
 }
 
+struct kvm_plane *kvm_alloc_plane(void)
+{
+	return kzalloc(sizeof(struct kvm_plane), GFP_KERNEL_ACCOUNT);
+}
+
+void kvm_free_plane(struct kvm_plane *plane)
+{
+	kfree(plane);
+}
+
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 {
 	char debug_name[32];
