@@ -911,4 +911,7 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu);
 
 void kvm_flush_pml_buffer(struct kvm_vcpu *vcpu, u16 pml_idx);
 
+struct kvm_plane *x86_alloc_plane(void);
+void x86_free_plane(struct kvm_plane *plane);
+
 #endif
