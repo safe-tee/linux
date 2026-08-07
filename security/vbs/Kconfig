@@ -14,3 +14,19 @@ config VBS
 	  later).  Hardware confidential-compute is out of scope.
 
 	  If unsure, say N.
+
+config VBS_KVM_PLANES
+	bool "VBS backend: KVM software planes"
+	depends on VBS && KVM_GUEST
+	help
+	  VBS backend that uses a KVM paravirt hypercall to communicate
+	  between plane-0 (the normal guest kernel) and plane-1 (a secure
+	  kernel running in a separate KVM VM plane managed by QEMU).
+
+	  This minimal backend supports loading (connecting to) and
+	  unloading the secure plane via a shared-memory calling area.
+
+	  Select this if you are running under KVM with VM planes support.
+
+	  If unsure, say N.
+

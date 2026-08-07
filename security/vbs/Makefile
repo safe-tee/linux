@@ -3,3 +3,5 @@ obj-$(CONFIG_VBS) += vbs.o
 # probe.o links before core.o so the backend is registered (vbs_probe_init)
 # early in the rootfs_initcall level.
 vbs-y := probe.o core.o
+
+obj-$(CONFIG_VBS_KVM_PLANES)	+= kvm_planes.o
