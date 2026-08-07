@@ -390,6 +390,11 @@ struct kvm_vcpu_common {
 
 	bool plane_switch;
 
+	/* VBS VTL-call state, shared across this CPU's plane vCPUs. */
+	gpa_t vtl_call_ca;
+	bool vtl_call_pending;
+	bool vtl_plane_ready;
+
 	struct kvm_vcpu_arch_common arch;
 };
 
