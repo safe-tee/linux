@@ -299,6 +299,8 @@ config SECURITY_COMMONCAP_KUNIT_TEST
 
 	  If unsure, say N.
 
+source "security/vbs/Kconfig"
+
 source "security/Kconfig.hardening"
 
 endmenu

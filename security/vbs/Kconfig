@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VBS
+	bool "Virtualization-Based Security (VBS) support"
+	depends on X86_64
+	help
+	  Enable a transport-agnostic interface between the guest OS
+	  (plane-0) and a secure kernel running in a higher-privileged
+	  plane-1.
+
+	  The core VBS layer dispatches calls from kernel subsystems to a
+	  platform-specific backend.  VBS is software-only: backends are
+	  software/hypervisor planes (KVM software planes now, Hyper-V VSM
+	  later).  Hardware confidential-compute is out of scope.
+
+	  If unsure, say N.
