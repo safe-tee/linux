@@ -7562,6 +7562,65 @@ int ____kvm_emulate_hypercall(struct kvm_vcpu *vcpu, int cpl,
 		vcpu->arch.complete_userspace_io = complete_hypercall;
 		return 0;
 	}
+	case KVM_HC_VBS_VTL_CALL: {
+		/*
+		 * Runtime VBS call from the normal plane (0) into the secure
+		 * plane (1), serviced in-kernel by switching planes.  a0 is the
+		 * guest-physical address of the shared calling area.  If the
+		 * secure plane is parked in its VTL return, deliver the GPA as
+		 * that return's value now; otherwise mark it pending so the
+		 * secure plane picks it up on its first return.
+		 */
+		struct kvm_vcpu_common *common = vcpu->common;
+		struct kvm_vcpu *secure;
+
+		if (vcpu->plane_level != 0)
+			break;
+
+		secure = common->vcpus[1];
+		if (!secure)
+			break;
+
+		common->vtl_call_ca = a0;
+		if (common->vtl_plane_ready) {
+			kvm_rax_write_raw(secure, a0);
+			common->vtl_call_pending = false;
+		} else {
+			common->vtl_call_pending = true;
+		}
+
+		kvm_vcpu_set_plane_runnable(secure);
+		kvm_vcpu_set_plane_stopped(vcpu);
+		ret = 0;
+		break;
+	}
+	case KVM_HC_VBS_VTL_RETURN: {
+		/*
+		 * The secure plane (>0) hands control back to plane 0.  On its
+		 * first return it announces readiness; if a call arrived while
+		 * it was still booting, deliver that calling-area GPA now and
+		 * stay in the secure plane.  Otherwise switch back to plane 0.
+		 */
+		struct kvm_vcpu_common *common = vcpu->common;
+
+		if (vcpu->plane_level == 0) {
+			ret = -KVM_EPERM;
+			break;
+		}
+
+		common->vtl_plane_ready = true;
+
+		if (common->vtl_call_pending) {
+			common->vtl_call_pending = false;
+			ret = common->vtl_call_ca;
+			break;
+		}
+
+		kvm_vcpu_set_plane_runnable(common->vcpus[0]);
+		kvm_vcpu_set_plane_stopped(vcpu);
+		ret = 0;
+		break;
+	}
 	case KVM_HC_VM_PLANES_CONFIG:
 	case KVM_HC_VM_PLANES_ACTIVATE:
 		/*
