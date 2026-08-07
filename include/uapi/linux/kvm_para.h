@@ -30,6 +30,10 @@
 #define KVM_HC_SEND_IPI		10
 #define KVM_HC_SCHED_YIELD		11
 #define KVM_HC_MAP_GPA_RANGE		12
+#define KVM_HC_VM_PLANES_CONFIG		13
+#define KVM_HC_VM_PLANES_ACTIVATE	14
+#define KVM_HC_VBS_VTL_CALL		15
+#define KVM_HC_VBS_VTL_RETURN		16
 
 /*
  * hypercalls use architecture specific
