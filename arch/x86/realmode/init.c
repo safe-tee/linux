@@ -44,6 +44,27 @@ void load_trampoline_pgtable(void)
 	__flush_tlb_all();
 }
 
+#ifdef CONFIG_VBS_SECURE_MONITOR
+/*
+ * A KVM VM-planes secure plane (plane > 0) is entered directly in 64-bit long
+ * mode and boots from a single carved-out high-memory region that contains no
+ * RAM below 1 MiB.  It runs with no firmware, ACPI sleep, or hibernation, so
+ * the 16-bit real-mode trampoline can neither be allocated (there is no
+ * sub-1M memory) nor is it ever used.  Disable the real-mode setup from an
+ * early_param so it takes effect before setup_arch() calls
+ * x86_platform.realmode_reserve(); triggered by the "secure_monitor" option,
+ * the same switch that activates the in-kernel secure-plane monitor.
+ */
+static int __init secure_plane_no_real_mode(char *arg)
+{
+	x86_platform.realmode_reserve = x86_init_noop;
+	x86_platform.realmode_init = x86_init_noop;
+	pr_info("realmode: secure plane: skipping sub-1M trampoline\n");
+	return 0;
+}
+early_param("secure_monitor", secure_plane_no_real_mode);
+#endif /* CONFIG_VBS_SECURE_MONITOR */
+
 void __init reserve_real_mode(void)
 {
 	phys_addr_t mem, limit = x86_init.resources.realmode_limit;

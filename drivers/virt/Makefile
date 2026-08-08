@@ -6,6 +6,7 @@
 obj-$(CONFIG_FSL_HV_MANAGER)	+= fsl_hypervisor.o
 obj-$(CONFIG_VMGENID)		+= vmgenid.o
 obj-$(CONFIG_STEAL_GOVERNOR)	+= steal_governor.o
+obj-$(CONFIG_VBS_SECURE_MONITOR)	+= secure_monitor.o
 obj-y				+= vboxguest/
 
 obj-$(CONFIG_NITRO_ENCLAVES)	+= nitro_enclaves/

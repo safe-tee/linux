@@ -13,6 +13,21 @@ menuconfig VIRT_DRIVERS
 
 if VIRT_DRIVERS
 
+config VBS_SECURE_MONITOR
+	bool "KVM VM-planes secure-plane monitor"
+	depends on X86 && KVM_GUEST
+	help
+	  In-kernel monitor for the secure plane (plane >0) of a KVM VM-planes
+	  guest.  When enabled and the "secure_monitor" kernel command-line
+	  option is present, a kernel thread hands control back to the normal
+	  plane via the KVM_HC_VBS_VTL_RETURN hypercall and then services VTL
+	  calls from a shared calling area.
+
+	  This is independent of the full VBS stack (CONFIG_VBS) so that any
+	  secure kernel can act as plane 1.  Per-call handlers are plumbed in
+	  incrementally; until then calls are acknowledged as no-ops.  Say N
+	  unless this kernel is used as a VM-planes secure plane.
+
 config VMGENID
 	tristate "Virtual Machine Generation ID driver"
 	default y
