@@ -16,6 +16,7 @@
 #include <linux/reboot.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
+#include <linux/vm_planes.h>
 #include <linux/vmalloc.h>
 
 static const struct vbs_ops *vbs_backend;
@@ -153,6 +154,17 @@ static int __init vbs_enable(void)
 
 	if (!vbs_plane_config_present())
 		return 0;
+
+	/*
+	 * Create and activate the secure plane before the backend issues its
+	 * first VTL call.  A failure here leaves the backend idle.
+	 */
+	ret = vm_planes_bootstrap();
+	if (ret) {
+		pr_warn("vbs: plane bootstrap failed (%d); backend \"%s\" left idle\n",
+			ret, ops->name);
+		return 0;
+	}
 
 	if (ops->init) {
 		ret = ops->init();

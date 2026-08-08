@@ -18,6 +18,7 @@ config VBS
 config VBS_KVM_PLANES
 	bool "VBS backend: KVM software planes"
 	depends on VBS && KVM_GUEST
+	select VM_PLANES
 	help
 	  VBS backend that uses a KVM paravirt hypercall to communicate
 	  between plane-0 (the normal guest kernel) and plane-1 (a secure
