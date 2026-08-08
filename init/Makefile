@@ -14,6 +14,10 @@ endif
 obj-$(CONFIG_GENERIC_CALIBRATE_DELAY) += calibrate.o
 obj-$(CONFIG_INITRAMFS_TEST)   += initramfs_test.o
 
+# vm_planes.o must link AFTER initramfs.o so that it reads the plane config
+# and kernels from the populated rootfs.
+obj-$(CONFIG_VM_PLANES)                += vm_planes.o
+
 obj-y                          += init_task.o
 
 mounts-y			:= do_mounts.o

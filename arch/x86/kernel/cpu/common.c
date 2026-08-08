@@ -28,8 +28,11 @@
 #include <linux/stackprotector.h>
 #include <linux/utsname.h>
 #include <linux/efi.h>
+#include <linux/kvm_para.h>
+#include <linux/vm_planes.h>
 
 #include <asm/alternative.h>
+#include <asm/kvm_para.h>
 #include <asm/cmdline.h>
 #include <asm/cpuid/api.h>
 #include <asm/perf_event.h>
@@ -2681,3 +2684,64 @@ static int __init tlbi_setup(char *str)
 	return 1;
 }
 __setup("tlbi=", tlbi_setup);
+
+#ifdef CONFIG_VM_PLANES
+int __init alloc_vm_planes(unsigned int plane_count,
+			   struct vm_plane_config *plane_cfg)
+{
+	phys_addr_t phys;
+	long ret;
+
+	if (!plane_count || !plane_cfg)
+		return -EINVAL;
+
+	if (!kvm_para_available()) {
+		pr_warn("vm_planes: hypercall interface unavailable\n");
+		return -ENODEV;
+	}
+
+	phys = virt_to_phys((void *)plane_cfg);
+
+	if (sizeof(unsigned long) < sizeof(phys_addr_t) && phys > ULONG_MAX) {
+		pr_warn("vm_planes: shared config address exceeds hypercall register width\n");
+		return -EOVERFLOW;
+	}
+
+	ret = kvm_hypercall2(KVM_HC_VM_PLANES_CONFIG,
+			     (unsigned long)phys,
+			     plane_count);
+	if (ret < 0) {
+		pr_warn("vm_planes: hypercall failed: %ld\n", ret);
+		return (int)ret;
+	}
+
+	return 0;
+}
+
+int __init activate_vm_planes(unsigned int plane_count,
+			      struct vm_plane_config *plane_cfg)
+{
+	phys_addr_t phys;
+	long ret;
+
+	if (!plane_count || !plane_cfg)
+		return -EINVAL;
+
+	if (!kvm_para_available()) {
+		pr_warn("vm_planes: hypercall interface unavailable\n");
+		return -ENODEV;
+	}
+
+	phys = virt_to_phys((void *)plane_cfg);
+
+	ret = kvm_hypercall2(KVM_HC_VM_PLANES_ACTIVATE,
+			     (unsigned long)phys,
+			     plane_count);
+	if (ret < 0) {
+		pr_warn("vm_planes: activate hypercall failed: %ld\n", ret);
+		return (int)ret;
+	}
+
+	return 0;
+}
+#endif /* CONFIG_VM_PLANES */

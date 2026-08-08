@@ -2115,6 +2115,24 @@ source "kernel/Kconfig.kexec"
 
 source "kernel/liveupdate/Kconfig"
 
+config VM_PLANES
+	bool "Enable VM planes early boot support" if EXPERT
+	depends on KVM_GUEST
+	default n
+	help
+	  Enable hypervisor-assisted multi-kernel (VM planes) support.
+
+	  When enabled, and when the VBS backend requests it, the kernel sets
+	  up the configured planes from the VBS enable path (late_initcall,
+	  after device drivers and before userspace).  The plane configuration
+	  and per-plane kernel images are read from the initramfs.
+
+	  The initrd config-vm-planes file is expected to provide per-plane
+	  entries for PLANE_<id>_KERNEL, PLANE_<id>_LOAD_OFFSET, and
+	  PLANE_<id>_MEMORY_SIZE.
+
+	  If unsure, say N.
+
 endmenu		# General setup
 
 source "arch/Kconfig"
