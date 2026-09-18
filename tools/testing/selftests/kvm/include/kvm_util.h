@@ -529,19 +529,27 @@ int kvm_gpa_to_guest_memfd(struct kvm_vm *vm, gpa_t gpa, off_t *fd_offset,
 	TEST_ASSERT(!(attributes) || (attributes) == KVM_MEMORY_ATTRIBUTE_PRIVATE,	\
 		    "Update me to support multiple attributes!")
 
-static inline void vm_set_memory_attributes(struct kvm_vm *vm, gpa_t gpa,
-					    size_t size, u64 attributes)
+static inline int __vm_set_memory_attributes(struct kvm_vm *vm, u64 gpa,
+					     u64 size, u64 attributes,
+					     u64 flags)
 {
 	struct kvm_memory_attributes attr = {
 		.attributes = attributes,
 		.address = gpa,
 		.size = size,
-		.flags = 0,
+		.flags = flags,
 	};
 
-	TEST_ASSERT_SUPPORTED_ATTRIBUTES(attributes);
+	return __vm_ioctl(vm, KVM_SET_MEMORY_ATTRIBUTES, &attr);
+}
 
-	vm_ioctl(vm, KVM_SET_MEMORY_ATTRIBUTES, &attr);
+static inline void vm_set_memory_attributes(struct kvm_vm *vm, gpa_t gpa,
+					    u64 size, u64 attributes)
+{
+	int rc;
+
+	rc = __vm_set_memory_attributes(vm, gpa, size, attributes, 0);
+	TEST_ASSERT_VM_VCPU_IOCTL(!rc, KVM_SET_MEMORY_ATTRIBUTES, rc, vm);
 }
 
 static inline int __gmem_set_memory_attributes(int fd, u64 offset,
