@@ -291,6 +291,25 @@ struct kvm_page_fault {
 };
 
 /*
+ * Returns true if the access indicated by @fault is forbidden by the
+ * protections in @access (a mask of ACC_READ_MASK/ACC_WRITE_MASK/
+ * ACC_EXEC_MASK).  The 7.3 implementation looks this up in the
+ * kvm_page_format permission table; this kernel predates that table, so
+ * check the fault type against the access mask directly.  SMAP/PKU/user
+ * distinctions do not apply here: gfn protection attributes are not
+ * CPL-dependent and never clear ACC_USER_MASK.
+ */
+static inline bool __permission_fault(struct kvm_mmu *mmu, unsigned access,
+				      struct kvm_page_fault *fault)
+{
+	if (fault->exec)
+		return !(access & ACC_EXEC_MASK);
+	if (fault->write)
+		return !(access & ACC_WRITE_MASK);
+	return !(access & ACC_READ_MASK);
+}
+
+/*
  * Return values of handle_mmio_page_fault(), mmu.page_fault(), fast_page_fault(),
  * and of course kvm_mmu_do_page_fault().
  *
