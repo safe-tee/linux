@@ -1020,6 +1020,7 @@ struct kvm_enable_cap {
 #define KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES 252
 #define KVM_CAP_PLANES 253
 #define KVM_CAP_HYPERV_FORWARD_HCALL 254
+#define KVM_CAP_HCALL_FAULT_EXIT 255
 
 /*
  * Userspace completion of a forwarded Hyper-V hypercall (KVM_EXIT_HYPERV_HCALL
