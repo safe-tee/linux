@@ -2646,10 +2646,15 @@ static u64 kvm_supports_private_mem(struct kvm *kvm)
 #ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
 u64 kvm_supported_vm_mem_attributes(struct kvm *kvm)
 {
-	if (gmem_in_place_conversion || !kvm_supports_private_mem(kvm))
-		return 0;
+	u64 supported_attrs = 0;
 
-	return KVM_MEMORY_ATTRIBUTE_PRIVATE;
+	if (kvm_arch_has_memory_protection_attributes(kvm))
+		supported_attrs |= KVM_MEMORY_ATTRIBUTE_PROT;
+
+	if (!gmem_in_place_conversion && kvm_supports_private_mem(kvm))
+		supported_attrs |= KVM_MEMORY_ATTRIBUTE_PRIVATE;
+
+	return supported_attrs;
 }
 
 /*
@@ -2766,9 +2771,7 @@ static bool kvm_pre_set_vm_memory_attributes(struct kvm *kvm,
 {
 	/*
 	 * Unconditionally add the range to the invalidation set, regardless of
-	 * whether or not the arch callback actually needs to zap SPTEs.  E.g.
-	 * if KVM supports RWX attributes in the future and the attributes are
-	 * going from R=>RW, zapping isn't strictly necessary.  Unconditionally
+	 * whether or not the arch callback actually needs to zap SPTEs.  Always
 	 * adding the range allows KVM to require that MMU invalidations add at
 	 * least one range between begin() and end(), e.g. allows KVM to detect
 	 * bugs where the add() is missed.  Relaxing the rule *might* be safe,
@@ -2844,6 +2847,25 @@ out_unlock:
 
 	return r;
 }
+
+bool __weak kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs)
+{
+	WARN_ONCE(true, "KVM_MEMORY_ATTRIBUTE_PROT requires kvm_arch_mem_attributes_supported_prot()");
+	return false;
+}
+
+bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs)
+{
+	if (attrs & ~kvm_supported_vm_mem_attributes(kvm))
+		return false;
+
+	if ((attrs & KVM_MEMORY_ATTRIBUTE_PROT) &&
+	    !kvm_arch_mem_attributes_supported_prot(kvm, attrs))
+		return false;
+
+	return true;
+}
+
 static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
 					   struct kvm_memory_attributes *attrs)
 {
@@ -2852,7 +2874,7 @@ static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
 	/* flags is currently not used. */
 	if (attrs->flags)
 		return -EINVAL;
-	if (attrs->attributes & ~kvm_supported_vm_mem_attributes(kvm))
+	if (!kvm_mem_attributes_valid(kvm, attrs->attributes))
 		return -EINVAL;
 	if (attrs->size == 0 || attrs->address + attrs->size < attrs->address)
 		return -EINVAL;

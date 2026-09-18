@@ -1890,6 +1890,9 @@ enum kvm_intr_type {
 	((vcpu) && (vcpu)->arch.handling_intr_from_guest && \
 	 (!!in_nmi() == ((vcpu)->arch.handling_intr_from_guest == KVM_HANDLING_NMI)))
 
+#define kvm_arch_has_memory_protection_attributes(kvm) \
+	(!(kvm) || !(kvm)->arch.has_private_mem)
+
 #if defined(CONFIG_KVM_SW_PROTECTED_VM) ||	\
     defined(CONFIG_KVM_INTEL_TDX) ||		\
     defined(CONFIG_KVM_AMD_SEV)
