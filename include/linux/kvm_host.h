@@ -992,8 +992,10 @@ struct kvm {
 	struct notifier_block pm_notifier;
 #endif
 #ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
-	/* Protected by slots_lock (for writes) and RCU (for reads) */
-	struct xarray mem_attr_array;
+	struct {
+		/* Protected by slots_lock (for writes) and RCU (for reads) */
+		struct xarray array;
+	} mem_attrs;
 #endif
 	char stats_id[KVM_STATS_NAME_SIZE];
 };
@@ -2773,7 +2775,7 @@ bool kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs
 bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs);
 static inline unsigned long kvm_get_vm_memory_attributes(struct kvm *kvm, gfn_t gfn)
 {
-	return xa_to_value(xa_load(&kvm->mem_attr_array, gfn));
+	return xa_to_value(xa_load(&kvm->mem_attrs.array, gfn));
 }
 
 bool kvm_range_has_vm_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
