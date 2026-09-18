@@ -2807,6 +2807,7 @@ static inline u64 kvm_mem_attributes_generation(struct kvm *kvm)
 	return smp_load_acquire(&kvm->mem_attrs.generation);
 }
 
+void kvm_arch_post_set_memory_attributes_unlocked(struct kvm *kvm);
 #else
 static inline unsigned long kvm_get_vm_memory_attributes(struct kvm *kvm, gfn_t gfn)
 {
