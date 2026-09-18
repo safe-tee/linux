@@ -2701,7 +2701,7 @@ bool kvm_range_has_vm_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 
 		WARN_ON_ONCE(!xa_to_value(entry));
 
-		if (xas.xa_index != index ||
+		if ((attrs && xas.xa_index != index) ||
 		    (xa_to_value(entry) & mask) != attrs)
 			return false;
 	}
