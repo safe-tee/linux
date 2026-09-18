@@ -2644,7 +2644,7 @@ static u64 kvm_supports_private_mem(struct kvm *kvm)
 #endif
 
 #ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
-static u64 kvm_supported_vm_mem_attributes(struct kvm *kvm)
+u64 kvm_supported_vm_mem_attributes(struct kvm *kvm)
 {
 	if (gmem_in_place_conversion || !kvm_supports_private_mem(kvm))
 		return 0;
