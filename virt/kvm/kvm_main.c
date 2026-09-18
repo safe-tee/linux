@@ -3458,6 +3458,11 @@ int __kvm_vcpu_map(struct kvm_vcpu *vcpu, gfn_t gfn, struct kvm_host_map *map,
 	if (WARN_ON_ONCE(map->hva))
 		kvm_vcpu_unmap(vcpu, map);
 
+	if (!kvm_mem_attributes_may_read_gfn(vcpu->kvm, gfn))
+		return -EFAULT;
+	if (writable && !kvm_mem_attributes_may_write_gfn(vcpu->kvm, gfn))
+		return -EFAULT;
+
 	map->pinned_page = NULL;
 	map->page = NULL;
 	map->hva = NULL;
@@ -3533,7 +3538,7 @@ static int __kvm_read_guest_page(struct kvm *kvm, struct kvm_memory_slot *slot,
 	if (kvm_is_error_hva(addr))
 		return -EFAULT;
 
-	attrs = kvm_get_memory_attributes(kvm, gfn);
+	attrs = kvm_get_vm_memory_attributes(kvm, gfn);
 	if (attrs & attr)
 		return -EFAULT;
 
