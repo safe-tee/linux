@@ -90,6 +90,7 @@ TEST_GEN_PROGS_x86 += x86/hyperv_cpuid
 TEST_GEN_PROGS_x86 += x86/hyperv_evmcs
 TEST_GEN_PROGS_x86 += x86/hyperv_extended_hypercalls
 TEST_GEN_PROGS_x86 += x86/hyperv_features
+TEST_GEN_PROGS_x86 += x86/hyperv_forward_hcall
 TEST_GEN_PROGS_x86 += x86/hyperv_ipi
 TEST_GEN_PROGS_x86 += x86/hyperv_svm_test
 TEST_GEN_PROGS_x86 += x86/hyperv_tlb_flush

@@ -1016,6 +1016,7 @@ struct kvm_enable_cap {
 #define KVM_CAP_ARM_PMU_V3_STRICT 251
 #define KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES 252
 #define KVM_CAP_PLANES 253
+#define KVM_CAP_HYPERV_FORWARD_HCALL 254
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
