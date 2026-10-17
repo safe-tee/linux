@@ -10001,10 +10001,19 @@ int kvm_arch_vcpu_ioctl_translate(struct kvm_vcpu *vcpu,
 
 	idx = srcu_read_lock(&vcpu->kvm->srcu);
 	gpa = kvm_mmu_gva_to_gpa_system(vcpu, vaddr, NULL);
+	/*
+	 * Report write access from a supervisor-level walk instead of the
+	 * hardcoded 1: Hyper-V's TranslateVirtualAddress write validation
+	 * is answered from this ioctl, and the reference hypervisor walks
+	 * with PFERR_WRITE_MASK and no user bit.
+	 */
+	tr->writeable = vcpu->arch.walk_mmu->gva_to_gpa(vcpu,
+							vcpu->arch.walk_mmu,
+							vaddr, PFERR_WRITE_MASK,
+							NULL) != INVALID_GPA;
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 	tr->physical_address = gpa;
 	tr->valid = gpa != INVALID_GPA;
-	tr->writeable = 1;
 	tr->usermode = 0;
 
 	vcpu_put(vcpu);
