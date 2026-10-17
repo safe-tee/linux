@@ -3502,6 +3502,8 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 	case KVM_SET_ONE_REG:
 	case KVM_GET_SREGS2:
 	case KVM_SET_SREGS2:
+	case KVM_GET_MP_STATE:
+	case KVM_SET_MP_STATE:
 	case KVM_GET_VCPU_EVENTS:
 	case KVM_SET_VCPU_EVENTS:
 	case KVM_GET_XCRS:
