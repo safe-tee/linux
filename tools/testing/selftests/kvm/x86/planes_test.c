@@ -89,6 +89,28 @@ static void test_plane_lifecycle(void)
 	TEST_ASSERT(vcpu1_fd >= 0,
 		    "KVM_CREATE_VCPU on plane 1 failed: errno %d", errno);
 
+	/* Plane 1 starts stopped; run state is readable and writable. */
+	{
+		u32 state = 0xff;
+
+		kvm_ioctl(vcpu1_fd, KVM_GET_PLANE_RUN_STATE, &state);
+		TEST_ASSERT_EQ(state, KVM_PLANE_RUN_STATE_STOPPED);
+
+		state = KVM_PLANE_RUN_STATE_RUNNABLE;
+		kvm_ioctl(vcpu1_fd, KVM_SET_PLANE_RUN_STATE, &state);
+		state = 0xff;
+		kvm_ioctl(vcpu1_fd, KVM_GET_PLANE_RUN_STATE, &state);
+		TEST_ASSERT_EQ(state, KVM_PLANE_RUN_STATE_RUNNABLE);
+
+		state = KVM_PLANE_RUN_STATE_STOPPED;
+		kvm_ioctl(vcpu1_fd, KVM_SET_PLANE_RUN_STATE, &state);
+
+		state = 2;
+		TEST_ASSERT_EQ(__kvm_ioctl(vcpu1_fd, KVM_SET_PLANE_RUN_STATE,
+					   &state), -1);
+		TEST_ASSERT_EQ(errno, EINVAL);
+	}
+
 	/* Register state is per plane: write plane 1, plane 0 unaffected. */
 	kvm_ioctl(vcpu1_fd, KVM_GET_REGS, &regs1);
 	regs1.rbx = 0x5157ca11;	/* arbitrary marker */
