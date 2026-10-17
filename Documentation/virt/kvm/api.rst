@@ -6846,6 +6846,13 @@ in the future may use the plane id when planes are supported by hardware (as is
 the case for VMPLs in AMD), or if KVM supports accelerated plane switch
 operations (as might be the case for Hyper-V VTLs).
 
+On x86, the Hyper-V partition-wide MSRs HV_X64_MSR_GUEST_OS_ID,
+HV_X64_MSR_HYPERCALL and HV_X64_MSR_REFERENCE_TSC are banked per plane,
+matching their per-VTL instances in the TLFS: an MSR access reads or
+writes the instance belonging to the plane of the vCPU fd that performs
+it.  A migrating VMM must therefore save and restore these MSRs through
+a vCPU fd of every plane, not just plane 0.
+
 4.146 KVM_GET_PLANE_RUN_STATE / KVM_SET_PLANE_RUN_STATE
 --------------------------------------------------------
 

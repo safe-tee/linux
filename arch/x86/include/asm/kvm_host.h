@@ -1091,6 +1091,8 @@ struct kvm_hv {
 	u64 hv_hypercall[KVM_MAX_PLANES];
 	bool hv_forward_hcalls;
 	u64 hv_tsc_page;
+	/* Banked REFERENCE_TSC MSR values for non-zero planes (VTLs). */
+	u64 hv_tsc_page_plane[KVM_MAX_PLANES];
 	enum hv_tsc_page_status hv_tsc_page_status;
 
 	/* Hyper-v based guest crash (NT kernel bugcheck) parameters */
@@ -1098,6 +1100,12 @@ struct kvm_hv {
 	u64 hv_crash_ctl;
 
 	struct ms_hyperv_tsc_page tsc_ref;
+	/*
+	 * tsc_ref was read back from the plane-0 page (guest TSC emulation
+	 * after migration) rather than computed by the host; such values
+	 * are plane-0-writable and must never seed another plane's page.
+	 */
+	bool tsc_ref_from_guest;
 
 	struct idr conn_to_evt;
 
