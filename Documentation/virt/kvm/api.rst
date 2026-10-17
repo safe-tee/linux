@@ -9423,6 +9423,12 @@ with ``hyperv.u.hcall.result`` set.  Hypercalls KVM implements itself,
 and the ordering of CPUID-enforcement checks against hypercall
 dispatch, are unaffected.
 
+When KVM_CHECK_EXTENSION reports a value of 2 or more, a result with
+KVM_HV_HCALL_RESULT_RAISE_UD set makes KVM raise #UD at the hypercall
+instruction instead of completing it (honoured only while forwarding
+is enabled).  A VMM must not set that bit on kernels reporting 1,
+where it lands in the guest's RAX as part of the result.
+
 7.50 KVM_CAP_HCALL_FAULT_EXIT
 ------------------------------------
 

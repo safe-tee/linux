@@ -1043,7 +1043,9 @@ struct kvm_enable_cap {
  * Userspace completion of a forwarded Hyper-V hypercall (KVM_EXIT_HYPERV_HCALL
  * under KVM_CAP_HYPERV_FORWARD_HCALL): setting this bit in the result makes
  * KVM raise #UD at the faulting instruction instead of completing the
- * hypercall; all other result bits are then ignored.
+ * hypercall; all other result bits are then ignored.  Only honoured while
+ * forwarding is enabled, and only on kernels where
+ * KVM_CHECK_EXTENSION(KVM_CAP_HYPERV_FORWARD_HCALL) returns >= 2.
  */
 #define KVM_HV_HCALL_RESULT_RAISE_UD	(1ULL << 63)
 #define KVM_CAP_HYPERV_VTL_SWITCH 256

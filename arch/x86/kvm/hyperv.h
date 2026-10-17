@@ -130,6 +130,9 @@ struct kvm_vcpu_hv {
 	u64 vtl_entry_rcx;
 	bool vtl_entry_regs_valid;
 
+	u64 hcall_exit_rip;
+	bool hcall_resume_pending;
+
 	bool suspended;
 	int waiting_on;
 };
