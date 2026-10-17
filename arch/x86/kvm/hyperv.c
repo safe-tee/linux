@@ -1633,7 +1633,8 @@ static int kvm_hv_set_msr(struct kvm_vcpu *vcpu, u32 msr, u64 data, bool host)
 
 		if (!(data & HV_X64_MSR_VP_ASSIST_PAGE_ENABLE)) {
 			hv_vcpu->hv_vapic = data;
-			if (kvm_lapic_set_pv_eoi(vcpu, 0, 0))
+			if (!vcpu->plane_level &&
+			    kvm_lapic_set_pv_eoi(vcpu, 0, 0))
 				return 1;
 			break;
 		}
@@ -1651,9 +1652,24 @@ static int kvm_hv_set_msr(struct kvm_vcpu *vcpu, u32 msr, u64 data, bool host)
 			return 1;
 		hv_vcpu->hv_vapic = data;
 		kvm_vcpu_mark_page_dirty(vcpu, gfn);
-		if (kvm_lapic_set_pv_eoi(vcpu,
-					    gfn_to_gpa(gfn) | KVM_MSR_ENABLED,
-					    sizeof(struct hv_vp_assist_page)))
+
+		/*
+		 * The gfn_to_hva cache behind the PV EOI / APIC assist
+		 * optimization validates against plane 0's memory
+		 * attributes, and a higher plane's VP assist page may
+		 * live on a page the plane protected against plane 0
+		 * (the Windows secure kernel's does). Don't arm PV EOI
+		 * there: pv_eoi.msr_val stays clear, which keeps
+		 * kvm_hv_assist_page_enabled() false for the plane, so
+		 * every assist-page consumer behind it (PV EOI, nested
+		 * enlightened VMCS, the SVM VP-assist read) is disabled
+		 * and KVM never touches the page's contents.  The guest
+		 * always performs a real EOI.
+		 */
+		if (!vcpu->plane_level &&
+		    kvm_lapic_set_pv_eoi(vcpu,
+					 gfn_to_gpa(gfn) | KVM_MSR_ENABLED,
+					 sizeof(struct hv_vp_assist_page)))
 			return 1;
 		break;
 	}
