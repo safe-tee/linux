@@ -10684,7 +10684,39 @@ int kvm_arch_plane_init(struct kvm *kvm, struct kvm_plane *plane,
 
 void kvm_arch_plane_destroy(struct kvm_plane *plane)
 {
+	struct kvm *kvm = plane->kvm;
+	int i;
+
 	kvfree(rcu_dereference_check(plane->arch.apic_map, 1));
+
+	if (plane->level == 0)
+		return;
+
+	/*
+	 * Drop the APICv inhibit taken in kvm_arch_plane_init() when the
+	 * last nonzero plane goes away.  Only the KVM_CREATE_PLANE error
+	 * path destroys a nonzero plane while the VM is live; at VM
+	 * teardown plane 0 is destroyed first and kvm->planes[0] is
+	 * already NULL, which skips the update (the inhibit machinery
+	 * needs plane 0 and SRCU, both gone by then).
+	 */
+	if (!kvm->planes[0])
+		return;
+
+	/*
+	 * Reaching here means a nonzero plane died while the VM is live,
+	 * which only the KVM_CREATE_PLANE error path does - under
+	 * kvm->lock.  A future kvm_destroy_planes() reordered to tear
+	 * nonzero planes down before plane 0 would get here locklessly;
+	 * catch that instead of silently poking freed APICv state.
+	 */
+	lockdep_assert_held(&kvm->lock);
+
+	for (i = 1; i < KVM_MAX_PLANES; i++)
+		if (kvm->planes[i] && kvm->planes[i] != plane)
+			return;
+
+	kvm_clear_apicv_inhibit(kvm, APICV_INHIBIT_REASON_PLANES);
 }
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)

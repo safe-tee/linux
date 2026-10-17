@@ -1272,7 +1272,12 @@ static struct kvm_plane *kvm_create_plane(struct kvm *kvm, unsigned plane_level)
 	if (kvm_arch_plane_init(kvm, plane, plane_level))
 		goto out_free_plane;
 
-	kvm->planes[plane_level] = plane;
+	/*
+	 * Pairs with the lock-free readers of kvm->planes[] (MSI delivery,
+	 * SEV VMPL targeting): the plane's fields must be visible before
+	 * the pointer is.
+	 */
+	smp_store_release(&kvm->planes[plane_level], plane);
 
 	return plane;
 
@@ -6015,8 +6020,15 @@ static int kvm_vm_ioctl_create_plane(struct kvm *kvm, unsigned id)
 	return fd;
 
 put_kvm:
-	kvm_put_kvm(kvm);
+	/*
+	 * kvm_create_plane() published the plane; unpublish it before
+	 * freeing (kvm->lock is held throughout, so readers who take it
+	 * never observe the dead pointer) and so that VM teardown does
+	 * not destroy it a second time.
+	 */
+	kvm->planes[id] = NULL;
 	kvm_destroy_one_plane(plane);
+	kvm_put_kvm(kvm);
 put_fd:
 	put_unused_fd(fd);
 	return r;
@@ -6137,7 +6149,14 @@ static int kvm_vm_ioctl_set_plane_overlay(struct kvm *kvm,
 		return -EINVAL;
 	if (ov->uaddr & ~PAGE_MASK)
 		return -EINVAL;
-	plane = kvm->planes[ov->plane];
+	/*
+	 * Read under kvm->lock: KVM_CREATE_PLANE publishes and, on its
+	 * error path, unpublishes-and-frees the plane under that lock, so
+	 * a pointer observed here is either NULL or a plane that lives
+	 * until VM teardown.
+	 */
+	scoped_guard(mutex, &kvm->lock)
+		plane = kvm->planes[ov->plane];
 	if (!plane)
 		return -EINVAL;
 
