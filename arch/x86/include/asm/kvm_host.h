@@ -751,13 +751,24 @@ void kvm_arch_vcpu_common_destroy(struct kvm_vcpu_common *common);
 
 struct kvm_vcpu_arch {
 	/*
-	 * Hyper-V VSM: an APIC event (fixed vector or NMI) was delivered to
-	 * this plane while it was suspended.  Set at delivery, cleared when
-	 * the plane next runs; a lower plane's run loop uses it to force a
-	 * VTL entry even when the vector is currently masked by this
-	 * plane's TPR (matching the reference host's apic_pending_vtls).
+	 * Hyper-V VSM: a fixed APIC vector was delivered to this plane
+	 * while it was suspended.  Set at delivery, cleared when the plane
+	 * next runs; a lower plane's run loop uses it to force a VTL entry
+	 * once the vector is deliverable under this plane's PPR (TLFS 15.9:
+	 * an interrupt the higher VTL's priority masks is held pending and
+	 * the VTL does not switch).  While masked, the marker is held, so
+	 * the entry fires when a VTL round trip leaves the vector
+	 * deliverable.
 	 */
 	bool hv_apic_event_pending;
+
+	/*
+	 * Hyper-V VSM: an NMI was aimed at this (higher) plane.  Forces a
+	 * VTL entry unconditionally: the NMI itself is folded back to
+	 * plane 0 (reference host behaviour), so the higher plane's APIC
+	 * carries no trace of it and the PPR gate above cannot apply.
+	 */
+	bool hv_nmi_event_pending;
 
 	/*
 	 * rip and regs accesses must go through

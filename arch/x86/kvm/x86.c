@@ -697,6 +697,13 @@ void kvm_inject_nmi(struct kvm_vcpu *vcpu)
 {
 	atomic_inc(&vcpu->arch.nmi_queued);
 	kvm_make_request(KVM_REQ_NMI, vcpu);
+	/*
+	 * NMI state posted to a suspended higher plane earns one entry
+	 * attempt through the single-shot marker, like the APIC event
+	 * path; the queued NMI itself is delivered when the plane runs.
+	 */
+	if (vcpu->plane_level)
+		WRITE_ONCE(vcpu->arch.hv_nmi_event_pending, true);
 }
 
 void kvm_queue_exception_e(struct kvm_vcpu *vcpu, unsigned nr, u32 error_code)
@@ -3206,8 +3213,13 @@ static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
 	if (events->flags & KVM_VCPUEVENT_VALID_NMI_PENDING) {
 		vcpu->arch.nmi_pending = 0;
 		atomic_set(&vcpu->arch.nmi_queued, events->nmi.pending);
-		if (events->nmi.pending)
+		if (events->nmi.pending) {
 			kvm_make_request(KVM_REQ_NMI, vcpu);
+			/* One entry attempt for a parked higher plane. */
+			if (vcpu->plane_level)
+				WRITE_ONCE(vcpu->arch.hv_nmi_event_pending,
+					   true);
+		}
 	}
 	kvm_x86_call(set_nmi_mask)(vcpu, events->nmi.masked);
 
@@ -8313,25 +8325,36 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 #endif
 		/*
 		 * Forced entry is edge-triggered on the posting of an
-		 * event, not level-triggered on the target's IRR, matching
-		 * the reference host's apic_pending_vtls bitmap: one entry
-		 * attempt per posted interrupt, via the hv_apic_event_pending
-		 * marker __apic_accept_irq sets.  A vector that stays
+		 * event, not level-triggered on the target's IRR: one
+		 * entry attempt per posted interrupt, via the
+		 * hv_apic_event_pending marker __apic_accept_irq sets.
+		 * The attempt is gated on deliverability (TLFS 15.9: an
+		 * interrupt the higher VTL's priority mask blocks is held
+		 * pending and the VTL does not switch).  A masked vector
+		 * holds its marker, so the entry fires if a VTL round
+		 * trip leaves the vector deliverable; the plane consumes
+		 * its own marker when it runs.  A vector that stays
 		 * latched after a refused attempt (no VP assist page yet)
-		 * or that was masked by the plane's TPR waits for the next
-		 * cooperative entry or the next posted event; scanning the
-		 * IRR here instead would replay it the moment the assist
-		 * page is re-enabled.  A pending synthetic-timer request
-		 * counts as well: it can only be processed (and its
-		 * interrupt delivered) once the higher plane runs, so it
-		 * would otherwise never fire while the plane is suspended.
+		 * waits for the next cooperative entry or the next posted
+		 * event; scanning the IRR here instead would replay it
+		 * the moment the assist page is re-enabled.  NMIs force
+		 * entry ungated through their own single-shot marker, set
+		 * wherever NMI state is posted to a higher plane (the
+		 * higher APIC carries nothing to gate on; the NMI itself
+		 * is folded back to plane 0 on the APIC path).  A pending
+		 * synthetic-timer request counts as well: it can only be
+		 * processed (and its interrupt delivered) once the higher
+		 * plane runs, so it would otherwise never fire while the
+		 * plane is suspended.
+		 *
+		 * The reference host forces entry even for a TPR-masked
+		 * vector; the suite's TPR test probes for both behaviours.
 		 */
-		if (READ_ONCE(higher->arch.hv_apic_event_pending) ||
+		if ((READ_ONCE(higher->arch.hv_apic_event_pending) &&
+		     higher->arch.apic && kvm_apic_has_interrupt(higher) >= 0) ||
+		    READ_ONCE(higher->arch.hv_nmi_event_pending) ||
 		    kvm_cpu_has_extint(higher) ||
 		    kvm_test_request(KVM_REQ_HV_STIMER, higher) ||
-		    kvm_test_request(KVM_REQ_NMI, higher) ||
-		    atomic_read(&higher->arch.nmi_queued) ||
-		    higher->arch.nmi_pending ||
 		    (higher->arch.apic &&
 		     atomic_read(&higher->arch.apic->lapic_timer.pending)))
 			return higher;
@@ -8360,9 +8383,17 @@ static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
 	 * Single-shot, as in the reference host: if userspace refuses
 	 * the entry (e.g. the target VTL has no VP assist page yet),
 	 * the event waits in the target's IRR for a cooperative entry
-	 * rather than re-triggering an exit storm.
+	 * rather than re-triggering an exit storm.  Each marker is
+	 * consumed only by its own approved attempt: when this exit was
+	 * triggered by another clause (extint, stimer, timer) while the
+	 * posted vector is still masked, the APIC marker stays armed so
+	 * a VTL round trip that unmasks the vector can retrigger the
+	 * entry.
 	 */
-	WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
+	if (READ_ONCE(higher->arch.hv_apic_event_pending) &&
+	    higher->arch.apic && kvm_apic_has_interrupt(higher) >= 0)
+		WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
+	WRITE_ONCE(higher->arch.hv_nmi_event_pending, false);
 
 	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
 	vcpu->run->hyperv.type = KVM_EXIT_HYPERV_VTL_INTERRUPT;
@@ -8919,9 +8950,32 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	if (READ_ONCE(to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch)) {
 		struct kvm_vcpu *higher = kvm_higher_plane_with_event(vcpu);
 
-		if (higher && kvm_hv_vtl_interrupt_entry(vcpu, higher)) {
-			kvm_make_request(KVM_REQ_EVENT, higher);
-			kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
+		if (higher) {
+			if (kvm_hv_vtl_interrupt_entry(vcpu, higher)) {
+				kvm_make_request(KVM_REQ_EVENT, higher);
+				kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
+			} else {
+				/*
+				 * Single-shot in in-kernel mode too: the
+				 * refusal (a failing control-area write;
+				 * blocked planes are filtered in
+				 * kvm_higher_plane_with_event()) cannot
+				 * succeed until external action, so consume
+				 * the markers rather than repeating the
+				 * failing guest write on every exit.  The
+				 * event stays latched in the plane's own
+				 * pending state for its next entry.  A
+				 * still-masked vector keeps its marker; only
+				 * its own approved attempt consumes it.
+				 */
+				if (READ_ONCE(higher->arch.hv_apic_event_pending) &&
+				    higher->arch.apic &&
+				    kvm_apic_has_interrupt(higher) >= 0)
+					WRITE_ONCE(higher->arch.hv_apic_event_pending,
+						   false);
+				WRITE_ONCE(higher->arch.hv_nmi_event_pending,
+					   false);
+			}
 		}
 	}
 #endif
@@ -8934,12 +8988,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	/*
 	 * This plane is running and about to evaluate its events: its
-	 * pended-while-suspended marker is consumed.  The clear must come
+	 * pended-while-suspended markers are consumed.  The clear must come
 	 * after the VTL-exit and plane-reschedule bail-outs above: a run
-	 * aborted there never evaluates the pended event, and nothing
-	 * re-arms the marker for a TPR-masked vector.
+	 * aborted there never evaluates the pended event.
 	 */
 	WRITE_ONCE(vcpu->arch.hv_apic_event_pending, false);
+	WRITE_ONCE(vcpu->arch.hv_nmi_event_pending, false);
 
 	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win ||
 	    kvm_xen_has_interrupt(vcpu)) {

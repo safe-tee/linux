@@ -1498,7 +1498,7 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 			struct kvm_vcpu *twin;
 			int p;
 
-			WRITE_ONCE(vcpu->arch.hv_apic_event_pending, true);
+			WRITE_ONCE(vcpu->arch.hv_nmi_event_pending, true);
 			if (vcpu->common->vcpus[0])
 				kvm_inject_nmi(vcpu->common->vcpus[0]);
 			for (p = 0; p < vcpu->plane_level; p++) {
