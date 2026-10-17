@@ -198,7 +198,11 @@ static void test_page_restricted(struct kvm_vcpu *vcpu, int op,
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_MEMORY_FAULT);
 	TEST_ASSERT_EQ(vcpu->run->memory_fault.gpa, fault_paddr);
 	if (fault_reason)
-		TEST_ASSERT_EQ(vcpu->run->memory_fault.flags, fault_reason);
+		TEST_ASSERT_EQ(vcpu->run->memory_fault.flags &
+			       ~(KVM_MEMORY_EXIT_FLAG_GVA_VALID |
+				 KVM_MEMORY_EXIT_FLAG_PLANE_PROT |
+				 KVM_MEMORY_EXIT_FLAG_INSN_VALID),
+			       fault_reason);
 	TEST_ASSERT_EQ(vcpu->run->memory_fault.size, vm->page_size);
 }
 

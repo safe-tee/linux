@@ -2077,6 +2077,72 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 				svm->vmcb->control.insn_bytes : NULL,
 				svm->vmcb->control.insn_len);
 
+	/*
+	 * A plane-protection fault reflected to userspace becomes a TLFS
+	 * GPA intercept message carrying the faulting instruction's length
+	 * and bytes; see the equivalent harvest in handle_ept_violation().
+	 * Decode assists stash the raw fetch window (up to 15 bytes, not
+	 * the decoded length) in the VMCB for data accesses; run it
+	 * through the decoder to report the real length.  A fetch fault
+	 * stores no bytes, and the length of the branch that fetched the
+	 * faulting page is not architecturally available on SVM, so an
+	 * execute intercept reports length 0 (VMX hardware supplies the
+	 * fetching instruction's length there).
+	 */
+	if (rc == -EFAULT &&
+	    vcpu->run->exit_reason == KVM_EXIT_MEMORY_FAULT &&
+	    (vcpu->run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE_PROT)) {
+		unsigned int len = 0;
+
+		if (static_cpu_has(X86_FEATURE_DECODEASSISTS) &&
+		    svm->vmcb->control.insn_len &&
+		    x86_decode_emulated_instruction(vcpu, 0,
+						    svm->vmcb->control.insn_bytes,
+						    svm->vmcb->control.insn_len) ==
+								EMULATION_OK) {
+			struct x86_emulate_ctxt *ctxt = vcpu->arch.emulate_ctxt;
+
+			len = min_t(unsigned int, ctxt->_eip - ctxt->eip,
+				    sizeof(vcpu->run->memory_fault.insn_bytes));
+		}
+
+		vcpu->run->memory_fault.insn_len = len;
+		if (len) {
+			/*
+			 * Copy from the decoder's fetch cache, not from the
+			 * VMCB window: the decoder fetches any bytes beyond
+			 * the window from guest memory, so the decoded
+			 * length can exceed control.insn_len, and the
+			 * VMCB-sourced tail would be whatever an earlier
+			 * intercept left behind.
+			 */
+			memcpy(vcpu->run->memory_fault.insn_bytes,
+			       vcpu->arch.emulate_ctxt->fetch.data, len);
+			vcpu->run->memory_fault.flags |=
+				KVM_MEMORY_EXIT_FLAG_INSN_VALID;
+		}
+
+		/*
+		 * The reflected fault is delivered to the higher VTL like an
+		 * exception, and fault delivery gives the to-be-restarted
+		 * instruction RFLAGS.RF=1 (no instruction-breakpoint
+		 * re-trigger on the retry).  VMX saves the fault-adjusted RF
+		 * in guest RFLAGS on a fault-type exit and the TLFS message
+		 * carries that value; SVM saves RF as it was during
+		 * execution, so apply the fault adjustment by hand.
+		 *
+		 * Under NMI-window single-stepping the vmcb RFLAGS carries
+		 * KVM's own TF/RF, and the guest view lives in
+		 * nmi_singlestep_guest_rflags: set RF there too, or
+		 * svm_get_rflags() hides it from userspace and
+		 * disable_nmi_singlestep() wipes it from the vmcb when the
+		 * window closes.
+		 */
+		if (unlikely(svm->nmi_singlestep))
+			svm->nmi_singlestep_guest_rflags |= X86_EFLAGS_RF;
+		svm_set_rflags(vcpu, svm_get_rflags(vcpu) | X86_EFLAGS_RF);
+	}
+
 	if (rc > 0 && error_code & PFERR_GUEST_RMP_MASK)
 		sev_handle_rmp_fault(vcpu, gpa, error_code);
 

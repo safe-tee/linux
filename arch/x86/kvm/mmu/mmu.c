@@ -4870,6 +4870,8 @@ static int kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 
 	if (kvm_faultin_memory_protections(vcpu, fault)) {
 		kvm_mmu_prepare_memory_fault_exit(vcpu, fault);
+		if (kvm_arch_max_planes(kvm) > 1)
+			vcpu->run->memory_fault.flags |= KVM_MEMORY_EXIT_FLAG_PLANE_PROT;
 		return -EFAULT;
 	}
 

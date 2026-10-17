@@ -2800,6 +2800,18 @@ static inline void kvm_prepare_memory_fault_exit(struct kvm_vcpu *vcpu,
 	vcpu->run->memory_fault.gpa = gpa;
 	vcpu->run->memory_fault.size = size;
 
+	/*
+	 * Clear the extended fields: only the x86 plane-protection harvest
+	 * fills them in (with the matching validity flags), and a leftover
+	 * from an earlier exit would otherwise masquerade as this fault's
+	 * instruction.  All-zero insn_bytes is a valid x86 encoding, so
+	 * zeroing alone is not a distinguishable "not provided" marker.
+	 */
+	vcpu->run->memory_fault.gva = 0;
+	vcpu->run->memory_fault.insn_len = 0;
+	memset(vcpu->run->memory_fault.insn_bytes, 0,
+	       sizeof(vcpu->run->memory_fault.insn_bytes));
+
 	vcpu->run->memory_fault.flags = 0;
 
 	if (is_write)

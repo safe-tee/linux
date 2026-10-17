@@ -6027,9 +6027,7 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 	 */
 	if (ret == -EFAULT &&
 	    vcpu->run->exit_reason == KVM_EXIT_MEMORY_FAULT &&
-	    (vcpu->run->memory_fault.flags & (KVM_MEMORY_EXIT_FLAG_READ |
-					      KVM_MEMORY_EXIT_FLAG_WRITE |
-					      KVM_MEMORY_EXIT_FLAG_EXEC))) {
+	    (vcpu->run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE_PROT)) {
 		unsigned int len;
 
 		if (exit_qualification & EPT_VIOLATION_GVA_IS_VALID) {
@@ -6047,7 +6045,6 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 		len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
 		len = min_t(unsigned int, len,
 			    sizeof(vcpu->run->memory_fault.insn_bytes));
-		vcpu->run->memory_fault.insn_len = len;
 		if (!(exit_qualification & EPT_VIOLATION_ACC_INSTR)) {
 			struct x86_exception e;
 
@@ -6059,10 +6056,16 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 			 */
 			if (kvm_read_guest_virt(vcpu, kvm_get_linear_rip(vcpu),
 						vcpu->run->memory_fault.insn_bytes,
-						len, &e))
+						len, &e)) {
 				memset(vcpu->run->memory_fault.insn_bytes, 0,
 				       sizeof(vcpu->run->memory_fault.insn_bytes));
+				len = 0;
+			}
 		}
+		vcpu->run->memory_fault.insn_len = len;
+		if (len)
+			vcpu->run->memory_fault.flags |=
+				KVM_MEMORY_EXIT_FLAG_INSN_VALID;
 	}
 	return ret;
 }

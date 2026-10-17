@@ -481,10 +481,25 @@ struct kvm_run {
 #define KVM_MEMORY_EXIT_FLAG_EXEC       (1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
 #define KVM_MEMORY_EXIT_FLAG_GVA_VALID	(1ULL << 4)
+/* The fault was caused by the vCPU's plane's memory protections. */
+#define KVM_MEMORY_EXIT_FLAG_PLANE_PROT	(1ULL << 5)
+/*
+ * insn_len/insn_bytes are valid.  For an EXEC fault the faulting
+ * instruction itself cannot be read: insn_bytes stays zero, and
+ * insn_len is the length of the instruction which performed the
+ * fetch (reported by VMX hardware; not available on SVM).
+ */
+#define KVM_MEMORY_EXIT_FLAG_INSN_VALID	(1ULL << 6)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
-			/* set on plane-protection faults when available */
+			/*
+			 * gva/insn_len/insn_bytes are set on plane-protection
+			 * faults when available, and are zero on every other
+			 * memory-fault exit.  They are enumerated, along with
+			 * the PLANE_PROT and INSN_VALID flags, by the plane
+			 * memory overlay capability.
+			 */
 			__u64 gva;
 			__u32 insn_len;
 			__u8  insn_bytes[16];

@@ -836,6 +836,9 @@ static int FNAME(page_fault)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 		if (walker.memory_attributes_fault) {
 			kvm_prepare_memory_fault_exit(vcpu, walker.gfn << PAGE_SHIFT,
 						      PAGE_SIZE, false, false, false);
+			if (kvm_arch_max_planes(vcpu->kvm) > 1)
+				vcpu->run->memory_fault.flags |=
+					KVM_MEMORY_EXIT_FLAG_PLANE_PROT;
 			return -EFAULT;
 		}
 
