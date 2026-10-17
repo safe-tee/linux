@@ -1410,6 +1410,31 @@ static void __kvm_synchronize_tsc(struct kvm_vcpu *vcpu, u64 offset, u64 tsc,
 	if (vcpu->arch.guest_tsc_protected)
 		return;
 
+	/*
+	 * The planes of a vCPU share its TSC and online_vcpus counts the
+	 * vCPU once, so a plane vCPU neither counts as a matching vCPU nor
+	 * starts a generation; its plane 0 sibling speaks for it.  Nor may
+	 * it perturb the global matching window (last_tsc_ and
+	 * user_set_tsc): KVM_SET_MSRS is accepted on plane fds, and a TSC
+	 * write on a plane fd
+	 * moving the window would corrupt the next plane-0 write's match
+	 * decision.  Latch the generation from the plane-0 sibling, which
+	 * exists by construction for a plane twin, rather than from the
+	 * VM-global cur_tsc_* that may belong to a different vCPU's
+	 * generation entirely.
+	 */
+	if (vcpu->plane_level) {
+		struct kvm_vcpu *sibling = vcpu->common->vcpus[0];
+
+		vcpu->arch.last_guest_tsc = tsc;
+		kvm_vcpu_write_tsc_offset(vcpu, offset);
+
+		vcpu->arch.this_tsc_generation = sibling->arch.this_tsc_generation;
+		vcpu->arch.this_tsc_nsec = sibling->arch.this_tsc_nsec;
+		vcpu->arch.this_tsc_write = sibling->arch.this_tsc_write;
+		return;
+	}
+
 	if (user_set_tsc)
 		vcpu->kvm->arch.user_set_tsc = true;
 
