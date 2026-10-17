@@ -2734,13 +2734,21 @@ check_and_send_ipi:
 	if ((vector < HV_IPI_LOW_VECTOR) || (vector > HV_IPI_HIGH_VECTOR))
 		return HV_STATUS_INVALID_HYPERCALL_INPUT;
 
-	/* TLFS: in_vtl bit 4 selects an explicit target VTL. */
-	if (in_vtl & 0x10)
+	/*
+	 * TLFS: in_vtl bit 4 selects an explicit target VTL.  A VTL may
+	 * interrupt its own level and lower ones, never a higher one
+	 * (TLFS 15.9, "VTL Interrupt Management": each VTL sends and
+	 * receives interrupts without interference from a less secure
+	 * VTL).  The reference host omits this check; the suite's
+	 * SendIpi test probes for both behaviours.
+	 */
+	if (in_vtl & 0x10) {
 		target_plane = in_vtl & 0xf;
-	else
+		if (target_plane > vcpu->plane_level)
+			return HV_STATUS_ACCESS_DENIED;
+	} else {
 		target_plane = vcpu->plane_level;
-	if (target_plane >= KVM_MAX_PLANES)
-		return HV_STATUS_INVALID_HYPERCALL_INPUT;
+	}
 
 	if (all_cpus)
 		kvm_hv_send_ipi_to_many(kvm, vector, NULL, 0, target_plane);
