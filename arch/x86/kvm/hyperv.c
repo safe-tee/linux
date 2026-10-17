@@ -2152,6 +2152,23 @@ static int kvm_hv_hypercall_check_params(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
+/*
+ * A TLB flush hypercall flushes the caller's VTL view of the target VPs:
+ * resolve the target to the vCPU of the caller's plane, which has its own
+ * roots and TLB tag.  Fall back to plane 0 when the plane vCPU does not
+ * exist (it then has no TLB to flush either).
+ */
+static struct kvm_vcpu *hv_flush_plane_vcpu(struct kvm_vcpu *caller,
+					    struct kvm_vcpu *v)
+{
+	struct kvm_vcpu *pv;
+
+	if (!caller->plane_level)
+		return v;
+	pv = v->common->vcpus[caller->plane_level];
+	return pv ?: v;
+}
+
 static s64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 {
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
@@ -2285,10 +2302,17 @@ static s64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	 * analyze it here, flush TLB regardless of the specified address space.
 	 */
 	if (all_cpus && !is_guest_mode(vcpu)) {
-		kvm_for_each_vcpu(i, v, kvm)
+		kvm_for_each_vcpu(i, v, kvm) {
+			v = hv_flush_plane_vcpu(vcpu, v);
 			hv_tlb_flush_enqueue(v, tlb_flush_entries, hc->rep_cnt, false);
+			if (vcpu->plane_level) {
+				kvm_make_request(KVM_REQ_HV_TLB_FLUSH, v);
+				kvm_vcpu_kick(v);
+			}
+		}
 
-		kvm_make_all_cpus_request(kvm, KVM_REQ_HV_TLB_FLUSH);
+		if (!vcpu->plane_level)
+			kvm_make_all_cpus_request(kvm, KVM_REQ_HV_TLB_FLUSH);
 	} else if (!is_guest_mode(vcpu)) {
 		sparse_set_to_vcpu_mask(kvm, sparse_banks, valid_bank_mask, vcpu_mask);
 
@@ -2296,10 +2320,17 @@ static s64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 			v = kvm_get_vcpu(kvm, i);
 			if (!v)
 				continue;
+			v = hv_flush_plane_vcpu(vcpu, v);
 			hv_tlb_flush_enqueue(v, tlb_flush_entries, hc->rep_cnt, false);
+			if (vcpu->plane_level) {
+				kvm_make_request(KVM_REQ_HV_TLB_FLUSH, v);
+				kvm_vcpu_kick(v);
+			}
 		}
 
-		kvm_make_vcpus_request_mask(kvm, KVM_REQ_HV_TLB_FLUSH, vcpu_mask);
+		if (!vcpu->plane_level)
+			kvm_make_vcpus_request_mask(kvm, KVM_REQ_HV_TLB_FLUSH,
+						    vcpu_mask);
 	} else {
 		struct kvm_vcpu_hv *hv_v;
 
