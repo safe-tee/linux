@@ -1108,8 +1108,10 @@ struct kvm_hv {
 	u64 hv_guest_os_id[KVM_MAX_PLANES];
 	u64 hv_hypercall[KVM_MAX_PLANES];
 	bool hv_forward_hcalls;
-	u64 hv_tsc_page;
-	/* Banked REFERENCE_TSC MSR values for non-zero planes (VTLs). */
+	/*
+	 * HV_X64_MSR_REFERENCE_TSC is private to each VTL, the reference time
+	 * it exposes is not: every enabled page gets the same contents.
+	 */
 	u64 hv_tsc_page_plane[KVM_MAX_PLANES];
 	enum hv_tsc_page_status hv_tsc_page_status;
 

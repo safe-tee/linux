@@ -1247,6 +1247,49 @@ static inline bool tsc_page_update_unsafe(struct kvm_hv *hv)
 		hv->hv_tsc_emulation_control;
 }
 
+static bool hv_tsc_page_gfn(struct kvm_hv *hv, int plane, u64 *gfn)
+{
+	u64 msr = hv->hv_tsc_page_plane[plane];
+
+	if (!(msr & HV_X64_MSR_TSC_REFERENCE_ENABLE))
+		return false;
+
+	*gfn = msr >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
+	return true;
+}
+
+/* The lowest plane with an enabled page; it owns the sequence number. */
+static bool hv_first_tsc_page_gfn(struct kvm *kvm, u64 *gfn)
+{
+	struct kvm_hv *hv = to_kvm_hv(kvm);
+	int i;
+
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		if (hv_tsc_page_gfn(hv, i, gfn))
+			return true;
+	}
+
+	return false;
+}
+
+/* Write the first @len bytes of the reference page to every enabled plane. */
+static int hv_write_tsc_pages(struct kvm *kvm, size_t len)
+{
+	struct kvm_hv *hv = to_kvm_hv(kvm);
+	u64 gfn;
+	int i;
+
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		if (!hv_tsc_page_gfn(hv, i, &gfn))
+			continue;
+
+		if (kvm_write_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, len))
+			return -EFAULT;
+	}
+
+	return 0;
+}
+
 void kvm_hv_setup_tsc_page(struct kvm *kvm,
 			   struct pvclock_vcpu_time_info *hv_clock)
 {
@@ -1264,10 +1307,9 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	    hv->hv_tsc_page_status == HV_TSC_PAGE_UNSET)
 		return;
 
-	if (!(hv->hv_tsc_page & HV_X64_MSR_TSC_REFERENCE_ENABLE))
+	if (!hv_first_tsc_page_gfn(kvm, &gfn))
 		return;
 
-	gfn = hv->hv_tsc_page >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
 	/*
 	 * Because the TSC parameters only vary when there is a
 	 * change in the master clock, do not bother with caching.
@@ -1290,8 +1332,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	 * guest to use the time reference count MSR.
 	 */
 	hv->tsc_ref.tsc_sequence = 0;
-	if (kvm_write_guest(kvm, gfn_to_gpa(gfn),
-			    &hv->tsc_ref, sizeof(hv->tsc_ref.tsc_sequence)))
+	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence)))
 		goto out_err;
 
 	if (!compute_tsc_page_parameters(hv_clock, &hv->tsc_ref))
@@ -1299,7 +1340,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 
 	/* Ensure sequence is zero before writing the rest of the struct.  */
 	smp_wmb();
-	if (kvm_write_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, sizeof(hv->tsc_ref)))
+	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref)))
 		goto out_err;
 
 	/*
@@ -1313,8 +1354,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	smp_wmb();
 
 	hv->tsc_ref.tsc_sequence = tsc_seq;
-	if (kvm_write_guest(kvm, gfn_to_gpa(gfn),
-			    &hv->tsc_ref, sizeof(hv->tsc_ref.tsc_sequence)))
+	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence)))
 		goto out_err;
 
 	hv->tsc_ref_from_guest = false;
@@ -1522,61 +1562,12 @@ static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
 		hv->hv_hypercall[vcpu->plane_level] = data;
 		break;
 	}
-	case HV_X64_MSR_REFERENCE_TSC:
-		/*
-		 * The reference TSC page is a per-VTL instance.  Plane 0 keeps
-		 * the live masterclock-maintained page; a non-zero plane gets
-		 * a one-shot copy of the current parameters, which stay valid
-		 * while the masterclock is stable.
-		 */
-		if (vcpu->plane_level) {
-			struct ms_hyperv_tsc_page tsc_ref = {};
-			u32 tsc_seq;
-			u64 gfn;
+	case HV_X64_MSR_REFERENCE_TSC: {
+		u64 gfn;
 
-			hv->hv_tsc_page_plane[vcpu->plane_level] = data;
-			if (!(data & HV_X64_MSR_TSC_REFERENCE_ENABLE))
-				break;
-
-			/*
-			 * Copy only host-computed parameters.  After a
-			 * masterclock change under guest TSC emulation,
-			 * hv->tsc_ref holds values read back from the
-			 * plane-0 page, which the lowest VTL can write;
-			 * presenting those to another plane would let it
-			 * forge that plane's clock.  Without usable
-			 * parameters, publish an invalid (zero) sequence so
-			 * the plane falls back to the TIME_REF_COUNT MSR.
-			 */
-			if (hv->hv_tsc_page_status == HV_TSC_PAGE_SET &&
-			    !hv->tsc_ref_from_guest)
-				tsc_ref = hv->tsc_ref;
-
-			gfn = data >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
-			tsc_seq = tsc_ref.tsc_sequence;
-
-			/*
-			 * Write the body under a zero sequence, then the
-			 * real sequence, so a concurrent reader on this
-			 * plane never consumes torn parameters.
-			 */
-			tsc_ref.tsc_sequence = 0;
-			if (kvm_vcpu_write_guest(vcpu, gfn_to_gpa(gfn),
-						 &tsc_ref, sizeof(tsc_ref)))
-				return 1;
-
-			if (!tsc_seq)
-				break;
-
-			tsc_ref.tsc_sequence = tsc_seq;
-			if (kvm_vcpu_write_guest(vcpu, gfn_to_gpa(gfn),
-						 &tsc_ref,
-						 sizeof(tsc_ref.tsc_sequence)))
-				return 1;
-			break;
-		}
-		hv->hv_tsc_page = data;
-		if (hv->hv_tsc_page & HV_X64_MSR_TSC_REFERENCE_ENABLE) {
+		hv->hv_tsc_page_plane[vcpu->plane_level] = data;
+		/* Another plane's page may still be enabled: keep it updated. */
+		if (hv_first_tsc_page_gfn(kvm, &gfn)) {
 			if (!host)
 				hv->hv_tsc_page_status = HV_TSC_PAGE_GUEST_CHANGED;
 			else
@@ -1586,6 +1577,7 @@ static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
 			hv->hv_tsc_page_status = HV_TSC_PAGE_UNSET;
 		}
 		break;
+	}
 	case HV_X64_MSR_CRASH_P0 ... HV_X64_MSR_CRASH_P4:
 		return kvm_hv_msr_set_crash_data(kvm,
 						 msr - HV_X64_MSR_CRASH_P0,
@@ -1809,9 +1801,7 @@ static int kvm_hv_get_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata,
 		data = get_time_ref_counter(kvm);
 		break;
 	case HV_X64_MSR_REFERENCE_TSC:
-		data = vcpu->plane_level ?
-		       hv->hv_tsc_page_plane[vcpu->plane_level] :
-		       hv->hv_tsc_page;
+		data = hv->hv_tsc_page_plane[vcpu->plane_level];
 		break;
 	case HV_X64_MSR_CRASH_P0 ... HV_X64_MSR_CRASH_P4:
 		return kvm_hv_msr_get_crash_data(kvm,
