@@ -115,6 +115,9 @@ struct kvm_vcpu_hv {
 		u64 vm_id;
 		u32 vp_id;
 	} nested;
+
+	u64 vtl_entry_rax;
+	u64 vtl_entry_rcx;
 };
 
 /* "Hv#1" signature */

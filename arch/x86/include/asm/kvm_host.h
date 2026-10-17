@@ -1082,6 +1082,12 @@ enum hv_tsc_page_status {
 /* Hyper-V emulation context */
 struct kvm_hv {
 	struct mutex hv_lock;
+	bool hv_inkernel_vtl_switch;
+	/*
+	 * In-kernel VTL switches performed by this VM, counted against the
+	 * hv_vtl_switch_limit debug knob; saturates instead of wrapping.
+	 */
+	atomic_t vtl_switch_count;
 	/*
 	 * GUEST_OS_ID and the hypercall page are per-VTL instances in the
 	 * TLFS; bank them per plane so a higher VTL enabling its own

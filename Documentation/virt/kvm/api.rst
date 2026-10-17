@@ -7361,8 +7361,10 @@ EOI was received.
   #define KVM_EXIT_HYPERV_SYNIC          1
   #define KVM_EXIT_HYPERV_HCALL          2
   #define KVM_EXIT_HYPERV_SYNDBG         3
+  #define KVM_EXIT_HYPERV_VTL_INTERRUPT  4
+  #define KVM_EXIT_HYPERV_REG_INTERCEPT  5
 			__u32 type;
-			__u32 pad1;
+			__u32 plane;
 			union {
 				struct {
 					__u32 msr;
@@ -7376,6 +7378,15 @@ EOI was received.
 					__u64 result;
 					__u64 params[2];
 				} hcall;
+				struct {
+					__u32 reg;
+					__u8 insn_len;
+					__u8 pad[3];
+					__u64 base;
+					__u32 limit;
+					__u32 pad2;
+					__u64 rip;
+				} reg_intercept;
 				struct {
 					__u32 msr;
 					__u32 pad2;
@@ -7393,6 +7404,11 @@ EOI was received.
 Indicates that the VCPU exits into userspace to process some tasks
 related to Hyper-V emulation.
 
+'plane' identifies the plane the exit concerns: the plane of the vCPU
+that triggered the exit, or for KVM_EXIT_HYPERV_VTL_INTERRUPT the
+higher plane to be entered.  On kernels without plane support the
+field was padding and reads as zero.
+
 Valid values for 'type' are:
 
 	- KVM_EXIT_HYPERV_SYNIC -- synchronously notify user-space about
@@ -7406,6 +7422,25 @@ in userspace.
 Hyper-V Synthetic debugger state change. Notification is used to either update
 the pending_page location or to send a control command (send the buffer located
 in send_page or recv a buffer to recv_page).
+
+	- KVM_EXIT_HYPERV_VTL_INTERRUPT -- the plane named by 'plane' has a
+
+pending event that preempts the current, lower plane (TLFS: higher VTL
+interrupts preempt lower VTLs).  The VMM is expected to perform a VTL
+entry into that plane.  Delivered only while in-kernel VTL switching
+(KVM_CAP_HYPERV_VTL_SWITCH, see section 7.51) is disabled, and
+single-shot: if the VMM declines the entry, the event waits in the
+target plane for a cooperative entry rather than re-triggering the
+exit.
+
+	- KVM_EXIT_HYPERV_REG_INTERCEPT -- a descriptor-table write that a
+
+higher plane intercepted (KVM_CAP_HYPERV_REG_INTERCEPT) has been
+diverted to userspace instead of being applied.  'reg_intercept'
+carries the HV_X64_REGISTER_* id of the written register, the
+descriptor-table base and limit the guest tried to load, and the RIP
+and length of the writing instruction.  The vCPU's RIP has been
+rewound to that instruction; the higher plane owns its completion.
 
 ::
 
@@ -9340,6 +9375,28 @@ Hypercall parameters that are unused by the selected hypercall are not checked.
 For Hyper-V, unknown hypercalls are passed to userspace without checking their
 parameter pages.  The fault GPA is in the physical address space of the
 VM managed by userspace, after nested GPA translation.
+
+7.51 KVM_CAP_HYPERV_VTL_SWITCH
+------------------------------
+
+:Architectures: x86
+:Target: VM
+:Parameters: args[0] is 1 to enable in-kernel VTL switches, 0 to disable them
+
+When enabled, KVM handles the non-fast forms of the HvCallVtlCall and
+HvCallVtlReturn hypercalls itself where it can: the calling plane's
+vCPU is suspended mid-hypercall and its twin in the target plane
+resumed, with the VTL-shared register state (GPRs except RSP, CR2, FPU)
+carried across and the entered VTL's assist page updated as the TLFS
+specifies.  A transition KVM cannot handle (a fast-form call, no twin
+vCPU in the target plane, a target that cannot be entered) falls back
+to the KVM_CAP_HYPERV_FORWARD_HCALL path, so a VMM enabling this
+capability must still implement the userspace switch and should enable
+forwarding too.
+
+While this capability is disabled, a pending event for a higher plane
+instead surfaces as a KVM_EXIT_HYPERV_VTL_INTERRUPT exit (see section
+5) telling the VMM to enter that plane.
 
 8. Other capabilities.
 ======================

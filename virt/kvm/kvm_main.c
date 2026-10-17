@@ -481,6 +481,7 @@ static int kvm_vcpu_init_common(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned
 		goto out_drop_counter;
 	}
 	common->run = page_address(page);
+	kvm_vcpu_cancel_vtl_fpu_carry(common);
 
 	mutex_init(&common->mutex);
 

@@ -2312,6 +2312,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_HYPERV_ENFORCE_CPUID:
 	case KVM_CAP_SYS_HYPERV_CPUID:
 	case KVM_CAP_HYPERV_FORWARD_HCALL:
+	case KVM_CAP_HYPERV_VTL_SWITCH:
 #endif
 	case KVM_CAP_HCALL_FAULT_EXIT:
 	case KVM_CAP_PCI_SEGMENT:
@@ -3258,6 +3259,12 @@ static int kvm_vcpu_ioctl_x86_set_xsave(struct kvm_vcpu *vcpu,
 	 */
 	xstate->xsave.header.xfeatures &= ~vcpu->arch.guest_fpu.fpstate->xfd;
 
+	/*
+	 * Cancel a pending VTL FPU carry: it would overwrite the state
+	 * installed here on the next KVM_RUN.
+	 */
+	kvm_vcpu_cancel_vtl_fpu_carry(vcpu->common);
+
 	return fpu_copy_uabi_to_guest_fpstate(&vcpu->arch.guest_fpu,
 					      guest_xsave->region,
 					      kvm_caps.supported_xcr0,
@@ -4164,6 +4171,13 @@ planes_unlock:
 		if (cap->args[0] & ~1ULL)
 			break;
 		to_kvm_hv(kvm)->hv_forward_hcalls = !!cap->args[0];
+		r = 0;
+		break;
+	case KVM_CAP_HYPERV_VTL_SWITCH:
+		r = -EINVAL;
+		if (cap->args[0] & ~1ULL)
+			break;
+		to_kvm_hv(kvm)->hv_inkernel_vtl_switch = !!cap->args[0];
 		r = 0;
 		break;
 #endif
@@ -9392,6 +9406,55 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu_plane0)
 		if (vcpu == NULL)
 			return -EINVAL;
 
+#ifdef CONFIG_KVM_HYPERV
+		/*
+		 * An in-kernel VTL switch carries the shared guest FPU
+		 * state to the newly selected plane.  The source plane's
+		 * FPU was saved to its fpstate when its inner run loop
+		 * exited, so the buffers are current.
+		 */
+		if (common->vtl_fpu_from >= 0) {
+			struct kvm_vcpu *prev;
+
+			prev = common->vtl_fpu_from < KVM_MAX_PLANES ?
+			       common->vcpus[common->vtl_fpu_from] : NULL;
+			common->vtl_fpu_from = -1;
+			if (prev && prev != vcpu &&
+			    prev->arch.guest_fpu.fpstate &&
+			    vcpu->arch.guest_fpu.fpstate) {
+				struct fpstate *dst = vcpu->arch.guest_fpu.fpstate;
+				struct fpstate *src = prev->arch.guest_fpu.fpstate;
+
+				memcpy(&dst->regs.fxsave, &src->regs.fxsave,
+				       sizeof(struct fxregs_state));
+				/*
+				 * Only the legacy FXSAVE area (x87, XMM,
+				 * MXCSR) is VTL-shared; the XSAVE header and
+				 * extended components (PKRU in particular)
+				 * stay per-VTL.  Carry the source's FP/SSE
+				 * xfeatures bits along with the area: when
+				 * the source's components are in init state
+				 * the saved legacy area holds no valid
+				 * register image (XSAVES skipped it), and
+				 * marking it present would make XRSTOR load
+				 * zeroes as architectural state, MXCSR=0
+				 * included.  Without XSAVE the fpstate is
+				 * only the 512-byte legacy area and there is
+				 * no header to maintain.
+				 */
+				if (boot_cpu_has(X86_FEATURE_XSAVE)) {
+					u64 carry = src->regs.xsave.header.xfeatures &
+						    (XFEATURE_MASK_FP | XFEATURE_MASK_SSE);
+
+					dst->regs.xsave.header.xfeatures =
+						(dst->regs.xsave.header.xfeatures &
+						 ~(XFEATURE_MASK_FP | XFEATURE_MASK_SSE)) |
+						carry;
+				}
+			}
+		}
+#endif
+
 		common->plane_switch = false;
 		ret = __kvm_arch_vcpu_ioctl_run(vcpu);
 		if (ret)
@@ -9681,6 +9744,12 @@ int kvm_arch_vcpu_ioctl_set_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu)
 	fxsave->rip = fpu->last_ip;
 	fxsave->rdp = fpu->last_dp;
 	memcpy(fxsave->xmm_space, fpu->xmm, sizeof(fxsave->xmm_space));
+
+	/*
+	 * Cancel a pending VTL FPU carry: it would overwrite the state
+	 * installed here on the next KVM_RUN.
+	 */
+	kvm_vcpu_cancel_vtl_fpu_carry(vcpu->common);
 
 	vcpu_put(vcpu);
 	return 0;

@@ -100,7 +100,7 @@ struct kvm_hyperv_exit {
 #define KVM_EXIT_HYPERV_HCALL          2
 #define KVM_EXIT_HYPERV_SYNDBG         3
 	__u32 type;
-	__u32 pad1;
+	__u32 plane;
 	union {
 		struct {
 			__u32 msr;
@@ -1029,6 +1029,7 @@ struct kvm_enable_cap {
  * hypercall; all other result bits are then ignored.
  */
 #define KVM_HV_HCALL_RESULT_RAISE_UD	(1ULL << 63)
+#define KVM_CAP_HYPERV_VTL_SWITCH 256
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;

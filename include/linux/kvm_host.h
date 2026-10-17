@@ -342,6 +342,16 @@ struct kvm_vcpu_common {
 	/* Currently active VCPU */
 	struct kvm_vcpu *current_vcpu;
 
+#ifdef CONFIG_KVM_HYPERV
+	/*
+	 * An in-kernel VTL switch moved execution away from this plane
+	 * (-1: none pending); the run loop copies the (VTL-shared) guest
+	 * FPU state from it when it selects the new plane, after the old
+	 * one's FPU has been saved.
+	 */
+	int vtl_fpu_from;
+#endif
+
 	struct kvm_vcpu *vcpus[KVM_MAX_PLANES];
 
 	/* Locks */
@@ -466,6 +476,17 @@ struct kvm_vcpu {
 	struct kvm_vcpu_common *common;
 	unsigned plane_level;
 };
+
+/*
+ * Cancel (or initialise away) a pending in-kernel VTL switch FPU carry.
+ * A no-op on configurations without the Hyper-V VTL switch.
+ */
+static inline void kvm_vcpu_cancel_vtl_fpu_carry(struct kvm_vcpu_common *common)
+{
+#ifdef CONFIG_KVM_HYPERV
+	common->vtl_fpu_from = -1;
+#endif
+}
 
 void kvm_vcpu_set_plane_runnable(struct kvm_vcpu *vcpu);
 void kvm_vcpu_set_plane_stopped(struct kvm_vcpu *vcpu);

@@ -2748,10 +2748,156 @@ static int kvm_hv_hypercall_userspace_exit(struct kvm_vcpu *vcpu,
 
 	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
 	vcpu->run->hyperv.type = KVM_EXIT_HYPERV_HCALL;
+	vcpu->run->hyperv.plane = vcpu->plane_level;
 	vcpu->run->hyperv.u.hcall.input = hc->param;
 	vcpu->run->hyperv.u.hcall.params[0] = hc->ingpa;
 	vcpu->run->hyperv.u.hcall.params[1] = hc->outgpa;
 	vcpu->arch.complete_userspace_io = kvm_hv_hypercall_complete_userspace;
+	return 0;
+}
+
+
+/* VTL control area in the VP assist page (TLFS struct hv_vp_vtl_control). */
+#define HV_VTL_CONTROL_OFFSET		8
+#define HV_VTL_ENTRY_REASON_VTL_CALL	1
+#define HV_VTL_RETURN_FAST_BIT		BIT_ULL(0)
+
+struct hv_vtl_control {
+	u32 vtl_entry_reason;
+	u8 vina_asserted;
+	u8 reserved[3];
+	u64 vtl_ret_x64rax;
+	u64 vtl_ret_x64rcx;
+} __packed;
+
+static u64 hv_vtl_assist_page_gpa(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
+
+	if (!hv_vcpu ||
+	    !(hv_vcpu->hv_vapic & HV_X64_MSR_VP_ASSIST_PAGE_ENABLE))
+		return 0;
+	return hv_vcpu->hv_vapic & HV_X64_MSR_VP_ASSIST_PAGE_ADDRESS_MASK;
+}
+
+/*
+ * In-kernel VTL call/return: switch between the plane vCPUs directly
+ * instead of bouncing every transition through userspace.  Keeps the
+ * userspace contract: VTL-shared register state (GPRs except RSP, CR2,
+ * FPU) follows the switch, the entered VTL's assist page gets the entry
+ * reason and the caller's RAX/RCX, and a non-fast VTL return restores
+ * the lower VTL's RAX/RCX from the returning VTL's control area.  The
+ * suspending plane stays suspended mid-hypercall, with
+ * hcall_resume_pending set: its pending completion delivers the
+ * instruction skip and the resume RAX when a later switch re-enters
+ * the plane.
+ *
+ * Returns -ENOENT when the transition cannot be handled here (no twin
+ * plane); the caller forwards the hypercall to userspace unchanged.
+ */
+static int hv_vtl_switch_limit = -1;
+module_param(hv_vtl_switch_limit, int, 0644);
+
+static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
+{
+	static const int shared_gprs[] = {
+		VCPU_REGS_RAX, VCPU_REGS_RBX, VCPU_REGS_RCX, VCPU_REGS_RDX,
+		VCPU_REGS_RSI, VCPU_REGS_RDI, VCPU_REGS_RBP,
+		VCPU_REGS_R8, VCPU_REGS_R9, VCPU_REGS_R10, VCPU_REGS_R11,
+		VCPU_REGS_R12, VCPU_REGS_R13, VCPU_REGS_R14, VCPU_REGS_R15,
+	};
+	int cur = vcpu->plane_level;
+	int to = is_return ? cur - 1 : cur + 1;
+	u64 rax = kvm_rax_read(vcpu), rcx = kvm_rcx_read(vcpu);
+	bool fast = is_return && (rax & HV_VTL_RETURN_FAST_BIT);
+	int limit = READ_ONCE(hv_vtl_switch_limit);
+	struct hv_vtl_control ctl;
+	struct kvm_vcpu *target;
+	u64 assist, resume;
+	int i;
+
+	if (to < 0 || to >= KVM_MAX_PLANES || !vcpu->common->vcpus[to])
+		return -ENOENT;
+	target = vcpu->common->vcpus[to];
+
+	/*
+	 * Debug budget on in-kernel switches, counted per VM and only for
+	 * switches that pass the eligibility checks above (a forwarded
+	 * switch consumes none).  The counter saturates so a guest cannot
+	 * wrap it back under an operator-set limit.
+	 */
+	if (limit >= 0 &&
+	    atomic_fetch_add_unless(&to_kvm_hv(vcpu->kvm)->vtl_switch_count,
+				    1, INT_MAX) >= limit)
+		return -ENOENT;
+
+	if (is_return && !fast) {
+		assist = hv_vtl_assist_page_gpa(vcpu);
+		if (assist) {
+			if (kvm_vcpu_read_guest(vcpu,
+						assist + HV_VTL_CONTROL_OFFSET,
+						&ctl, sizeof(ctl)))
+				return -ENOENT;
+		} else {
+			ctl.vtl_ret_x64rax = to_hv_vcpu(vcpu)->vtl_entry_rax;
+			ctl.vtl_ret_x64rcx = to_hv_vcpu(vcpu)->vtl_entry_rcx;
+		}
+	}
+
+	/* VTL-shared state: GPRs except RSP (RIP/RFLAGS stay private). */
+	for (i = 0; i < ARRAY_SIZE(shared_gprs); i++)
+		kvm_register_write_raw(target, shared_gprs[i],
+				       kvm_register_read_raw(vcpu,
+							     shared_gprs[i]));
+	target->arch.cr2 = vcpu->arch.cr2;
+	vcpu->common->vtl_fpu_from = cur;
+
+	if (!is_return) {
+		assist = hv_vtl_assist_page_gpa(target);
+		if (assist) {
+			ctl = (struct hv_vtl_control) {
+				.vtl_entry_reason = HV_VTL_ENTRY_REASON_VTL_CALL,
+				.vtl_ret_x64rax = rax,
+				.vtl_ret_x64rcx = rcx,
+			};
+			kvm_vcpu_write_guest(vcpu,
+					     assist + HV_VTL_CONTROL_OFFSET,
+					     &ctl, sizeof(ctl));
+		}
+		if (to_hv_vcpu(target)) {
+			to_hv_vcpu(target)->vtl_entry_rax = rax;
+			to_hv_vcpu(target)->vtl_entry_rcx = rcx;
+		}
+		resume = rax;
+	} else {
+		if (!fast)
+			kvm_register_write_raw(target, VCPU_REGS_RCX,
+					       ctl.vtl_ret_x64rcx);
+		resume = fast ? rax : ctl.vtl_ret_x64rax;
+	}
+
+	/*
+	 * The target resumes in a hypercall of its own (any time after its
+	 * very first entry).  Its pending completion delivers the deferred
+	 * instruction skip and the resume RAX from the shared run struct,
+	 * exactly as when userspace drives the switch; until then its
+	 * suspended RIP stays at the vmcall, which the higher VTL can
+	 * observe (and rewrite) through HvCallGetVpRegisters.
+	 */
+	if (target->arch.complete_userspace_io)
+		vcpu->run->hyperv.u.hcall.result = resume;
+
+	/*
+	 * Suspend the current plane in its uncompleted hypercall; the
+	 * switch back will provide its resume value the same way.
+	 */
+	vcpu->arch.complete_userspace_io = kvm_hv_hypercall_complete_userspace;
+
+	vcpu->plane_user_stopped = true;
+	kvm_vcpu_set_plane_stopped(vcpu);
+	target->plane_user_stopped = false;
+	kvm_vcpu_set_plane_runnable(target);
+	kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
 	return 0;
 }
 
@@ -2918,6 +3064,54 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 			break;
 		}
 		return kvm_hv_hypercall_userspace_exit(vcpu, &hc);
+	case HVCALL_VTL_CALL:
+	case HVCALL_VTL_RETURN:
+		/* Neither call takes a variable header or rep count. */
+		if (unlikely(hc.rep || hc.var_cnt)) {
+			ret = HV_STATUS_INVALID_HYPERCALL_INPUT;
+			break;
+		}
+		if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch &&
+		    !hc.fast &&
+		    !kvm_hv_vtl_switch(vcpu, hc.code == HVCALL_VTL_RETURN)) {
+			/*
+			 * Suspended mid-hypercall; the pending completion
+			 * delivers the result when the plane resumes.
+			 */
+			return 1;
+		}
+		if (to_kvm_hv(vcpu->kvm)->hv_forward_hcalls) {
+			/*
+			 * Retire the vmcall before the plane switch, like the
+			 * reference hypervisor: the VMM fully owns the resumed
+			 * context (GPR copy, control-area RAX/RCX restore).  A
+			 * completion deferred across the suspension fires on
+			 * whatever entry resumes this plane next - after a
+			 * forced higher-VTL entry that can be an arbitrary
+			 * interrupted instruction, which then has RAX and RIP
+			 * rewritten with stale hypercall results.
+			 */
+			ret = kvm_hv_hypercall_userspace_exit(vcpu, &hc);
+			if (!ret) {
+				/*
+				 * With guest TF and KVM_GUESTDBG_SINGLESTEP
+				 * the skip prepares KVM_EXIT_DEBUG in the
+				 * same run union, overwriting the exit just
+				 * prepared; the retired vmcall would then be
+				 * silently dropped and the VMM never perform
+				 * the switch.  Re-prepare the hypercall exit
+				 * in that case: the VMM must see it, at the
+				 * price of one missed step event.
+				 */
+				if (!kvm_skip_emulated_instruction(vcpu))
+					kvm_hv_hypercall_userspace_exit(vcpu,
+									&hc);
+				vcpu->arch.complete_userspace_io = NULL;
+				return 0;
+			}
+			break;
+		}
+		fallthrough;
 	default:
 		if (to_kvm_hv(vcpu->kvm)->hv_forward_hcalls)
 			return kvm_hv_hypercall_userspace_exit(vcpu, &hc);
