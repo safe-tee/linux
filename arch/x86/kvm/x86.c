@@ -324,11 +324,29 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_default_max_planes);
 
 unsigned kvm_arch_max_planes(struct kvm *kvm)
 {
+	unsigned int vendor_planes;
+
 	/* For now, planes are only supported with irqchip=split */
 	if (!irqchip_split(kvm))
 		return 1;
 
-	return kvm_x86_call(max_planes)(kvm);
+	vendor_planes = kvm_x86_call(max_planes)(kvm);
+
+	/*
+	 * When the plane count is guest-architectural (SEV-SNP VMPLs),
+	 * the vendor module owns it.  Otherwise planes are a software
+	 * construct and only exist when userspace has opted in to the
+	 * number of planes it is going to manage, via KVM_CAP_PLANES.
+	 */
+	if (vendor_planes > 1)
+		return vendor_planes;
+
+	/*
+	 * Lockless readers (KVM_CHECK_EXTENSION) race the KVM_ENABLE_CAP
+	 * store; the value is set once, so a torn-free read is all that
+	 * is needed.
+	 */
+	return READ_ONCE(kvm->arch.user_max_planes) ? : 1;
 }
 
 struct kvm_plane *x86_alloc_plane(void)
@@ -4094,6 +4112,28 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
 		kvm_clear_apicv_inhibit(kvm, APICV_INHIBIT_REASON_ABSENT);
 		r = 0;
 split_irqchip_unlock:
+		mutex_unlock(&kvm->lock);
+		break;
+	}
+	case KVM_CAP_PLANES: {
+		mutex_lock(&kvm->lock);
+		r = -EINVAL;
+		if (cap->args[0] < 1 || cap->args[0] > KVM_MAX_PLANES)
+			goto planes_unlock;
+		/*
+		 * Only ordinary VMs for now.  SEV-SNP VMs get their plane
+		 * count from the architectural VMPL support, and VM types
+		 * with protected state need per-plane audits first.
+		 */
+		if (kvm->arch.vm_type != KVM_X86_DEFAULT_VM)
+			goto planes_unlock;
+		r = -EEXIST;
+		if (kvm->created_vcpus || kvm->has_planes ||
+		    kvm->arch.user_max_planes)
+			goto planes_unlock;
+		WRITE_ONCE(kvm->arch.user_max_planes, cap->args[0]);
+		r = 0;
+planes_unlock:
 		mutex_unlock(&kvm->lock);
 		break;
 	}

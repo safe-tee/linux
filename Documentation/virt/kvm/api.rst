@@ -6825,6 +6825,12 @@ See also: :ref:`KVM_SET_MEMORY_ATTRIBUTES`.
 
 Creates a new *plane*, i.e. a separate privilege level for the virtual machine.
 
+The range of valid plane ids is [0, N) where N is the value returned by
+KVM_CHECK_EXTENSION(KVM_CAP_PLANES) on the VM file descriptor.  Plane 0 is
+the VM itself; for VM types where the plane count is not guest-architectural,
+ids above 0 only become valid after userspace enables KVM_CAP_PLANES with
+the number of planes it is going to manage (see section 7.48).
+
 Each plane has a numeric id that is used when communicating with KVM.  While
 KVM is currently agnostic to whether low ids are more or less privileged, it is
 expected that this will not always be the case in the future.  For example KVM
@@ -9222,6 +9228,27 @@ through hugetlbfs can be enabled for a VM. After the capability is
 enabled, cmma can't be enabled anymore and pfmfi and the storage key
 interpretation are disabled. If cmma has already been enabled or the
 hpage_2g module parameter is not set to 1, -EINVAL is returned.
+
+7.48 KVM_CAP_PLANES
+-------------------
+
+:Architectures: x86
+:Target: VM
+:Parameters: args[0] contains the number of planes to make available
+
+Opts the VM in to using multiple planes, raising the limit on plane ids
+that KVM_CREATE_PLANE accepts to args[0] (between 1 and the KVM_MAX_PLANES
+value implied by KVM_CHECK_EXTENSION(KVM_CAP_PLANES) on the system fd).
+
+Planes other than plane 0 only exist when userspace manages them, so by
+default a VM reports and accepts a single plane.  VM types whose plane
+count is guest-architectural (such as SEV-SNP, where it reflects the
+supported VMPLs) report that count without this capability, and enabling
+it on them fails with -EINVAL.
+
+This capability must be enabled before any vCPU or extra plane has been
+created, and the chosen count cannot be changed afterwards; otherwise
+-EEXIST is returned.
 
 8. Other capabilities.
 ======================
