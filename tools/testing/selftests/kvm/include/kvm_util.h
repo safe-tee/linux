@@ -863,6 +863,7 @@ static inline bool is_smt_on(void)
 	return false;
 }
 
+extern bool kvm_force_split_irqchip;
 void vm_create_irqchip(struct kvm_vm *vm);
 
 /*
