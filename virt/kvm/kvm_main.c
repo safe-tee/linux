@@ -2848,6 +2848,26 @@ static bool kvm_plane_range_has_memory_attributes(struct kvm_plane *plane,
 	return false;
 }
 
+bool kvm_any_plane_range_has_rw_memory_protections(struct kvm *kvm,
+						gfn_t start, gfn_t end)
+{
+	unsigned long mask = KVM_MEMORY_ATTRIBUTE_NR | KVM_MEMORY_ATTRIBUTE_NW;
+	int plane_level;
+
+	if (kvm_range_has_rw_memory_protections(kvm, start, end))
+		return true;
+
+	for (plane_level = 1; plane_level < KVM_MAX_PLANES; plane_level++) {
+		struct kvm_plane *plane = smp_load_acquire(&kvm->planes[plane_level]);
+
+		if (plane &&
+		    kvm_plane_range_has_memory_attributes(plane, start, end, mask))
+			return true;
+	}
+
+	return false;
+}
+
 static bool kvm_range_memory_attributes_need_sync(struct kvm_plane *plane,
 						  gfn_t start, gfn_t end,
 						  unsigned long attributes)
@@ -4032,7 +4052,8 @@ static int __kvm_gfn_to_hva_cache_init(struct kvm *kvm,
 	 * check has to happen after storing the generation number.
 	 */
 	ghc->attrs_generation = kvm_mem_attributes_generation(kvm);
-	if (kvm_range_has_rw_memory_protections(kvm, start_gfn, end_gfn + 1)) {
+	if (kvm_any_plane_range_has_rw_memory_protections(kvm, start_gfn,
+							end_gfn + 1)) {
 		ghc->hva = KVM_HVA_ERR_BAD;
 		return -EFAULT;
 	}

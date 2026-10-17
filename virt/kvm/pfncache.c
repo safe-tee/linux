@@ -304,7 +304,8 @@ static int __kvm_gpc_refresh(struct gfn_to_pfn_cache *gpc, gpa_t gpa, unsigned l
 			 * generation number.
 			 */
 			gpc->attrs_generation = kvm_mem_attributes_generation(kvm);
-			if (kvm_range_has_rw_memory_protections(kvm, gfn, gfn + 1)) {
+			if (kvm_any_plane_range_has_rw_memory_protections(kvm, gfn,
+									 gfn + 1)) {
 				gpc->uhva = KVM_HVA_ERR_BAD;
 				ret = -EFAULT;
 				goto out;

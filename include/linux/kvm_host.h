@@ -2870,6 +2870,8 @@ bool kvm_arch_post_set_vm_memory_attributes(struct kvm *kvm,
 u64 kvm_supported_vm_mem_attributes(struct kvm *kvm);
 bool kvm_range_has_any_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 				       unsigned long mask);
+bool kvm_any_plane_range_has_rw_memory_protections(struct kvm *kvm,
+						gfn_t start, gfn_t end);
 static inline struct xarray *kvm_plane_mem_attr_array(struct kvm_plane *plane)
 {
 	return plane->level ? &plane->mem_attrs :
@@ -2931,6 +2933,13 @@ static inline bool kvm_range_has_any_memory_attributes(struct kvm *kvm,
 static inline u64 kvm_mem_attributes_generation(struct kvm *kvm)
 {
 	return 0;
+}
+
+static inline bool kvm_any_plane_range_has_rw_memory_protections(struct kvm *kvm,
+							       gfn_t start,
+							       gfn_t end)
+{
+	return false;
 }
 
 #endif  /* CONFIG_KVM_VM_MEMORY_ATTRIBUTES */
