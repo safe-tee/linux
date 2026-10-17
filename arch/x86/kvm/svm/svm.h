@@ -326,9 +326,13 @@ struct vcpu_svm {
 	/*
 	 * V_TPR value written by sync_lapic_to_cr8() on the last entry.
 	 * sync_cr8_to_lapic() pushes V_TPR back into the APIC only when it
-	 * differs, i.e. when the guest wrote CR8 in guest mode: V_TPR holds
-	 * TPR[7:4] only, so an unconditional back-sync would zero TPR[3:0]
-	 * after every exit, losing the low nibble of an APIC TASKPRI write.
+	 * differs: V_TPR holds TPR[7:4] only, so an unconditional back-sync
+	 * would zero TPR[3:0] after every exit, losing the low nibble of an
+	 * APIC TASKPRI write.  A differing V_TPR implies a guest CR8 write,
+	 * but not the converse: a CR8 write of the same value is
+	 * indistinguishable from no write, so TPR[3:0] survives it where
+	 * the architectural write (and the intercepted path through
+	 * kvm_lapic_set_tpr()) would clear it.
 	 */
 	u8 v_tpr_entry;
 
