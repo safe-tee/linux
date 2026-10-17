@@ -10660,6 +10660,16 @@ int kvm_arch_plane_init(struct kvm *kvm, struct kvm_plane *plane,
 {
 	mutex_init(&plane->arch.apic_map_lock);
 
+	/*
+	 * Cross-plane event delivery (forced VTL entry, twin kicks, NMI
+	 * folding) relies on software injection via KVM_REQ_EVENT; hardware
+	 * APIC virtualization on one twin would bypass the bookkeeping the
+	 * other twin's plane depends on.  Mirrors the reference VSM
+	 * hypervisor, which force-disables APICv when VTLs are enabled.
+	 */
+	if (plane_level > 0)
+		kvm_set_apicv_inhibit(kvm, APICV_INHIBIT_REASON_PLANES);
+
 	return 0;
 }
 

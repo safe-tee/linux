@@ -623,6 +623,8 @@ enum kvm_apicv_inhibit {
 	 */
 	APICV_INHIBIT_REASON_PHYSICAL_ID_TOO_BIG,
 
+	APICV_INHIBIT_REASON_PLANES,
+
 	NR_APICV_INHIBIT_REASONS,
 };
 
@@ -642,7 +644,8 @@ enum kvm_apicv_inhibit {
 	__APICV_INHIBIT_REASON(PIT_REINJ),		\
 	__APICV_INHIBIT_REASON(SEV),			\
 	__APICV_INHIBIT_REASON(LOGICAL_ID_ALIASED),	\
-	__APICV_INHIBIT_REASON(PHYSICAL_ID_TOO_BIG)
+	__APICV_INHIBIT_REASON(PHYSICAL_ID_TOO_BIG),	\
+	__APICV_INHIBIT_REASON(PLANES)
 
 bool kvm_apicv_activated(struct kvm *kvm);
 bool kvm_vcpu_apicv_activated(struct kvm_vcpu *vcpu);
