@@ -1283,7 +1283,7 @@ static int hv_write_tsc_pages(struct kvm *kvm, size_t len)
 		if (!hv_tsc_page_gfn(hv, i, &gfn))
 			continue;
 
-		if (kvm_write_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, len))
+		if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, len))
 			return -EFAULT;
 	}
 

@@ -3925,6 +3925,33 @@ int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_write_guest);
 
+/* Write a page KVM maintains for the guest; plane protections do not apply. */
+int kvm_write_guest_unprotected(struct kvm *kvm, gpa_t gpa, const void *data,
+				unsigned long len)
+{
+	gfn_t gfn = gpa >> PAGE_SHIFT;
+	int seg;
+	int offset = offset_in_page(gpa);
+
+	while ((seg = next_segment(len, offset)) != 0) {
+		struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
+		unsigned long addr;
+
+		addr = gfn_to_hva_many(slot, gfn, NULL);
+		if (kvm_is_error_hva(addr))
+			return -EFAULT;
+		if (__copy_to_user((void __user *)addr + offset, data, seg))
+			return -EFAULT;
+		mark_page_dirty_in_slot(kvm, slot, gfn);
+		offset = 0;
+		len -= seg;
+		data += seg;
+		++gfn;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_write_guest_unprotected);
+
 int kvm_vcpu_write_guest(struct kvm_vcpu *vcpu, gpa_t gpa, const void *data,
 		         unsigned long len)
 {
