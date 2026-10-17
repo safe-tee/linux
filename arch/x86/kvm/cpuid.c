@@ -326,7 +326,7 @@ static void kvm_update_cpuid_runtime(struct kvm_vcpu *vcpu)
 						 vcpu->arch.ia32_xss, true);
 }
 
-static bool kvm_cpuid_has_hyperv(struct kvm_vcpu *vcpu)
+bool kvm_cpuid_has_hyperv(struct kvm_vcpu *vcpu)
 {
 #ifdef CONFIG_KVM_HYPERV
 	struct kvm_cpuid_entry2 *entry;
@@ -382,6 +382,7 @@ void kvm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 	struct kvm_cpuid_entry2 *best;
 	struct kvm_cpuid_entry2 *entry;
 	bool allow_gbpages;
+	bool hyperv_enabled;
 	int i;
 
 	memset(common->arch.cpu_caps, 0, sizeof(common->arch.cpu_caps));
@@ -458,7 +459,18 @@ void kvm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 					 __cr4_reserved_bits(guest_cpu_cap_has, vcpu);
 #undef __kvm_cpu_cap_has
 
-	kvm_hv_set_cpuid(vcpu, kvm_cpuid_has_hyperv(vcpu));
+	hyperv_enabled = kvm_cpuid_has_hyperv(vcpu);
+
+	/*
+	 * A plane twin created after KVM_SET_CPUID shares the common CPUID
+	 * without passing through kvm_set_cpuid(), which is what allocates
+	 * the Hyper-V context for the planes that exist at set time;
+	 * allocate it here for a late-created twin.
+	 */
+	if (hyperv_enabled && kvm_hv_vcpu_init(vcpu))
+		hyperv_enabled = false;
+
+	kvm_hv_set_cpuid(vcpu, hyperv_enabled);
 
 	/* Invoke the vendor callback only after the above state is updated. */
 	kvm_x86_call(vcpu_after_set_cpuid)(vcpu);
@@ -553,7 +565,7 @@ static int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,
 #ifdef CONFIG_KVM_HYPERV
 	if (kvm_cpuid_has_hyperv(vcpu)) {
 		vcpu_for_each_plane(common, i, v) {
-			r = kvm_hv_vcpu_init(vcpu);
+			r = kvm_hv_vcpu_init(v);
 			if (r)
 				goto err;
 		}

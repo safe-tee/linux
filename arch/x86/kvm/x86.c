@@ -3510,6 +3510,7 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 {
 	switch (ioctl) {
+	case KVM_ENABLE_CAP:
 	case KVM_GET_DEBUGREGS:
 	case KVM_SET_DEBUGREGS:
 	case KVM_GET_LAPIC:
@@ -9792,9 +9793,24 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	vcpu->arch.hv_root_tdp = INVALID_PAGE;
 #endif
 
+	/*
+	 * A plane twin created after KVM_SET_CPUID shares CPUID that may
+	 * already advertise Hyper-V.  Allocate the Hyper-V context now so
+	 * a failure fails the creation; left to kvm_vcpu_after_set_cpuid()
+	 * below, an -ENOMEM silently downgrades just this twin to no
+	 * Hyper-V (its MSRs fail) while the shared CPUID still advertises
+	 * the Hyper-V signature, and nothing short of another full
+	 * KVM_SET_CPUID repairs it.
+	 */
+	if (kvm_cpuid_has_hyperv(vcpu)) {
+		r = kvm_hv_vcpu_init(vcpu);
+		if (r)
+			goto free_guest_fpu;
+	}
+
 	r = kvm_x86_call(vcpu_create)(vcpu);
 	if (r)
-		goto free_guest_fpu;
+		goto free_hv;
 
 	kvm_xen_init_vcpu(vcpu);
 	vcpu_load(vcpu);
@@ -9805,6 +9821,8 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	vcpu_put(vcpu);
 	return 0;
 
+free_hv:
+	kvm_hv_vcpu_uninit(vcpu);
 free_guest_fpu:
 	fpu_free_guest_fpstate(&vcpu->arch.guest_fpu);
 free_emulate_ctxt:
