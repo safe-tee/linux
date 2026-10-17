@@ -3439,6 +3439,26 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 	if (cap->flags)
 		return -EINVAL;
 
+	/*
+	 * KVM_ENABLE_CAP is accepted on plane vCPU fds, but only the caps
+	 * below have been audited for plane_level > 0.  The nested paths
+	 * behind eVMCS and direct TLB flush have not, and the register
+	 * intercept only ever diverts plane 0 (hv_divert_dt_write() skips
+	 * higher planes); refuse those rather than implicitly extending
+	 * every current and future vCPU cap to planes.
+	 */
+	if (vcpu->plane_level) {
+		switch (cap->cap) {
+		case KVM_CAP_HYPERV_SYNIC:
+		case KVM_CAP_HYPERV_SYNIC2:
+		case KVM_CAP_HYPERV_ENFORCE_CPUID:
+		case KVM_CAP_ENFORCE_PV_FEATURE_CPUID:
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
 	switch (cap->cap) {
 #ifdef CONFIG_KVM_HYPERV
 	case KVM_CAP_HYPERV_SYNIC2:
