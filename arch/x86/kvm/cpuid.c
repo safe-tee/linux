@@ -173,6 +173,9 @@ static int kvm_check_cpuid(struct kvm_vcpu *vcpu)
 
 static u32 kvm_apply_cpuid_pv_features_quirk(struct kvm_vcpu *vcpu);
 static void kvm_update_cpuid_runtime(struct kvm_vcpu *vcpu);
+static void kvm_cpuid_apply_runtime(struct kvm_vcpu *vcpu, u32 function,
+				    u32 index, u32 *eax, u32 *ebx, u32 *ecx,
+				    u32 *edx);
 
 /* Check whether the supplied CPUID data is equal to what is already set for the vCPU. */
 static int kvm_cpuid_check_equal(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,
@@ -280,50 +283,51 @@ static u64 cpuid_get_supported_xss(struct kvm_vcpu *vcpu)
 	return (best->ecx | ((u64)best->edx << 32)) & kvm_caps.supported_xss;
 }
 
-static __always_inline void kvm_update_feature_runtime(struct kvm_vcpu *vcpu,
-						       struct kvm_cpuid_entry2 *entry,
-						       unsigned int x86_feature,
-						       bool has_feature)
-{
-	cpuid_entry_change(entry, x86_feature, has_feature);
-	guest_cpu_cap_change(vcpu->common, x86_feature, has_feature);
-}
-
+/* The table keeps plane 0's view of the runtime bits for KVM_GET_CPUID2. */
 static void kvm_update_cpuid_runtime(struct kvm_vcpu *vcpu)
 {
 	struct kvm_cpuid_entry2 *best;
+
+	/*
+	 * Compute from the plane-0 twin no matter which plane triggered
+	 * the refresh: KVM_SET_CPUID runs this for every plane in turn,
+	 * and KVM_GET_CPUID2 is reachable from any plane's fd.
+	 */
+	if (vcpu->common->vcpus[0])
+		vcpu = vcpu->common->vcpus[0];
 
 	vcpu->common->arch.cpuid_dynamic_bits_dirty = false;
 
 	best = kvm_find_cpuid_entry(vcpu, 1);
 	if (best) {
-		kvm_update_feature_runtime(vcpu, best, X86_FEATURE_OSXSAVE,
-					   kvm_is_cr4_bit_set(vcpu, X86_CR4_OSXSAVE));
-
-		kvm_update_feature_runtime(vcpu, best, X86_FEATURE_APIC,
-					   vcpu->arch.apic_base & MSR_IA32_APICBASE_ENABLE);
-
+		kvm_cpuid_apply_runtime(vcpu, 1, 0, &best->eax, &best->ebx,
+					&best->ecx, &best->edx);
+		guest_cpu_cap_change(vcpu->common, X86_FEATURE_OSXSAVE,
+				     cpuid_entry_has(best, X86_FEATURE_OSXSAVE));
+		guest_cpu_cap_change(vcpu->common, X86_FEATURE_APIC,
+				     cpuid_entry_has(best, X86_FEATURE_APIC));
 		if (!kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_MISC_ENABLE_NO_MWAIT))
-			kvm_update_feature_runtime(vcpu, best, X86_FEATURE_MWAIT,
-						   vcpu->arch.ia32_misc_enable_msr &
-						   MSR_IA32_MISC_ENABLE_MWAIT);
+			guest_cpu_cap_change(vcpu->common, X86_FEATURE_MWAIT,
+					     cpuid_entry_has(best, X86_FEATURE_MWAIT));
 	}
 
 	best = kvm_find_cpuid_entry_index(vcpu, 7, 0);
-	if (best)
-		kvm_update_feature_runtime(vcpu, best, X86_FEATURE_OSPKE,
-					   kvm_is_cr4_bit_set(vcpu, X86_CR4_PKE));
-
+	if (best) {
+		kvm_cpuid_apply_runtime(vcpu, 7, 0, &best->eax, &best->ebx,
+					&best->ecx, &best->edx);
+		guest_cpu_cap_change(vcpu->common, X86_FEATURE_OSPKE,
+				     cpuid_entry_has(best, X86_FEATURE_OSPKE));
+	}
 
 	best = kvm_find_cpuid_entry_index(vcpu, 0xD, 0);
 	if (best)
-		best->ebx = xstate_required_size(vcpu->arch.xcr0, false);
+		kvm_cpuid_apply_runtime(vcpu, 0xd, 0, &best->eax, &best->ebx,
+					&best->ecx, &best->edx);
 
 	best = kvm_find_cpuid_entry_index(vcpu, 0xD, 1);
-	if (best && (cpuid_entry_has(best, X86_FEATURE_XSAVES) ||
-		     cpuid_entry_has(best, X86_FEATURE_XSAVEC)))
-		best->ebx = xstate_required_size(vcpu->arch.xcr0 |
-						 vcpu->arch.ia32_xss, true);
+	if (best)
+		kvm_cpuid_apply_runtime(vcpu, 0xd, 1, &best->eax, &best->ebx,
+					&best->ecx, &best->edx);
 }
 
 bool kvm_cpuid_has_hyperv(struct kvm_vcpu *vcpu)
@@ -2143,16 +2147,57 @@ get_out_of_range_cpuid_entry(struct kvm_vcpu *vcpu, u32 *fn_ptr, u32 index)
 	return kvm_find_cpuid_entry_index(vcpu, basic->eax, index);
 }
 
+/*
+ * The planes share the CPUID table but not CR4, the APIC enable, MISC_ENABLE
+ * or XCR0/XSS: the bits that follow those come from the executing plane.
+ */
+static void kvm_cpuid_apply_runtime(struct kvm_vcpu *vcpu, u32 function,
+				    u32 index, u32 *eax, u32 *ebx, u32 *ecx,
+				    u32 *edx)
+{
+	switch (function) {
+	case 1:
+		*ecx &= ~feature_bit(OSXSAVE);
+		if (kvm_is_cr4_bit_set(vcpu, X86_CR4_OSXSAVE))
+			*ecx |= feature_bit(OSXSAVE);
+
+		*edx &= ~feature_bit(APIC);
+		if (vcpu->arch.apic_base & MSR_IA32_APICBASE_ENABLE)
+			*edx |= feature_bit(APIC);
+
+		if (!kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_MISC_ENABLE_NO_MWAIT)) {
+			*ecx &= ~feature_bit(MWAIT);
+			if (vcpu->arch.ia32_misc_enable_msr &
+			    MSR_IA32_MISC_ENABLE_MWAIT)
+				*ecx |= feature_bit(MWAIT);
+		}
+		break;
+	case 7:
+		if (index)
+			break;
+		*ecx &= ~feature_bit(OSPKE);
+		if (kvm_is_cr4_bit_set(vcpu, X86_CR4_PKE))
+			*ecx |= feature_bit(OSPKE);
+		break;
+	case 0xd:
+		if (index == 0)
+			*ebx = xstate_required_size(vcpu->arch.xcr0, false);
+		else if (index == 1 &&
+			 (*eax & (feature_bit(XSAVES) | feature_bit(XSAVEC))))
+			*ebx = xstate_required_size(vcpu->arch.xcr0 |
+						    vcpu->arch.ia32_xss, true);
+		break;
+	default:
+		break;
+	}
+}
+
 bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
 	       u32 *ecx, u32 *edx, bool exact_only)
 {
 	u32 orig_function = *eax, function = *eax, index = *ecx;
-	struct kvm_vcpu_common *common = vcpu->common;
 	struct kvm_cpuid_entry2 *entry;
 	bool exact, used_max_basic = false;
-
-	if (common->arch.cpuid_dynamic_bits_dirty)
-		kvm_update_cpuid_runtime(vcpu);
 
 	entry = kvm_find_cpuid_entry_index(vcpu, function, index);
 	exact = !!entry;
@@ -2167,6 +2212,7 @@ bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
 		*ebx = entry->ebx;
 		*ecx = entry->ecx;
 		*edx = entry->edx;
+		kvm_cpuid_apply_runtime(vcpu, function, index, eax, ebx, ecx, edx);
 		if (function == 7 && index == 0) {
 			u64 data;
 			if ((*ebx & (feature_bit(RTM) | feature_bit(HLE))) &&

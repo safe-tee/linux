@@ -276,8 +276,9 @@ static __always_inline bool guest_cpu_cap_has(struct kvm_vcpu *vcpu,
 	struct kvm_vcpu_common *common = vcpu->common;
 
 	/*
-	 * Except for MWAIT, querying dynamic feature bits is disallowed, so
-	 * that KVM can defer runtime updates until the next CPUID emulation.
+	 * Except for MWAIT, querying dynamic feature bits is disallowed: the
+	 * guest gets them from the state of the plane that executes CPUID, and
+	 * the table copy is refreshed only for the CPUID ioctls.
 	 */
 	BUILD_BUG_ON(x86_feature == X86_FEATURE_APIC ||
 		     x86_feature == X86_FEATURE_OSXSAVE ||

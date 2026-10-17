@@ -370,6 +370,13 @@ cpu's hardware control block.
 VCPUs for non-zero planes can only be created if the VCPU the same index has
 already been created for plane zero.
 
+The planes of a vCPU share its CPUID model, set through the plane 0 fd with
+KVM_SET_CPUID2.  The CPUID bits that follow a vCPU's own registers (OSXSAVE
+from CR4.OSXSAVE, OSPKE from CR4.PKE, the APIC enable, MWAIT from
+MISC_ENABLE, and the XSAVE area sizes from XCR0 and XSS) reflect the plane
+that executes CPUID, since every plane has these registers of its own.
+KVM_GET_CPUID2 returns them as plane 0 sees them.
+
 4.8 KVM_GET_DIRTY_LOG
 ---------------------
 
