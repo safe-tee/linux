@@ -174,6 +174,16 @@ void vcpu_load(struct kvm_vcpu *vcpu)
 {
 	int cpu = get_cpu();
 
+	/*
+	 * The preempt notifiers operate on common->current_vcpu, so it
+	 * must name the plane vCPU being loaded here: an ioctl taken on
+	 * another plane's fd than the one that ran last would otherwise
+	 * have a preemption arch-put the stale twin (whose state is not
+	 * resident) and arch-load it back over the state this load makes
+	 * resident.  The kick paths also read it to find the running
+	 * twin's pCPU.
+	 */
+	WRITE_ONCE(vcpu->common->current_vcpu, vcpu);
 	__this_cpu_write(kvm_running_vcpu, vcpu->common);
 	preempt_notifier_register(&vcpu->common->preempt_notifier);
 	kvm_arch_vcpu_load(vcpu, cpu);
@@ -4823,7 +4833,26 @@ static int kvm_plane_ioctl_create_vcpu(struct kvm_plane *plane, unsigned long id
 
 	kvm_vcpu_init(vcpu, kvm, id);
 
+	/*
+	 * A non-zero plane shares 'common' with a plane-0 twin which may
+	 * already be running.  kvm_arch_vcpu_create() calls vcpu_load(),
+	 * which publishes the half-created vCPU through
+	 * common->current_vcpu and registers the shared preempt notifier,
+	 * so it must not run concurrently with a twin's KVM_RUN: hold the
+	 * shared vCPU mutex across it.  Drop it before kvm->lock is taken
+	 * below, to respect the kvm->lock -> vcpu mutex ordering.
+	 */
+	if (plane->level > 0) {
+		r = mutex_lock_killable(kvm_vcpu_mutex(vcpu));
+		if (r)
+			goto vcpu_free_common;
+	}
+
 	r = kvm_arch_vcpu_create(vcpu);
+
+	if (plane->level > 0)
+		kvm_vcpu_unlock(vcpu);
+
 	if (r)
 		goto vcpu_free_common;
 
@@ -5528,7 +5557,7 @@ struct kvm_vcpu *kvm_vcpu_select_plane(struct kvm_vcpu *vcpu)
 		ret->plane_state = RUNNABLE;
 	}
 
-	common->current_vcpu = ret;
+	WRITE_ONCE(common->current_vcpu, ret);
 
 	common->plane_switch = false;
 
