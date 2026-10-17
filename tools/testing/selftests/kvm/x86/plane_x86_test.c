@@ -18,6 +18,23 @@
 #include "asm/kvm.h"
 #include "linux/kvm.h"
 
+/*
+ * Port note (dwmw stack): KVM_CAP_PLANES is a VM-level opt-in that takes
+ * the plane count and must precede vCPU creation; planes are not
+ * always-on.  The KVM_CAP_PLANES_USERSPACE_SWITCH subtests of the
+ * upstream planes series (userspace plane switch, lower/not-runnable
+ * interrupt events, CPUID runtime bits, hugepage mixed attributes) are
+ * omitted: this kernel drives plane switches through the Hyper-V VSM
+ * hypercalls and has no userspace-switch capability.  The remaining
+ * subtests' assertions are unchanged.
+ */
+#define NR_PLANES 2
+
+static void enable_planes(struct kvm_vm *vm)
+{
+	vm_enable_cap(vm, KVM_CAP_PLANES, NR_PLANES);
+}
+
 static void test_plane_regs(void)
 {
 	struct kvm_vm *vm;
@@ -28,6 +45,7 @@ static void test_plane_regs(void)
 	struct kvm_regs regs0, regs1;
 
 	vm = vm_create_barebones_irqchip(true);
+	enable_planes(vm);
 	vcpu = __vm_vcpu_add(vm, 0);
 	plane = vm_plane_add(vm, 1);
 	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
@@ -49,10 +67,47 @@ static void test_plane_regs(void)
 	ksft_test_result_pass("get/set regs for planes\n");
 }
 
+/*
+ * The planes of a VP share one TSC: a plane vCPU created later must take the
+ * TSC offset of its sibling, not start a new one.  Read the guest TSC on both
+ * fds back to back; the difference is the elapsed host time, not an offset.
+ */
+static void test_plane_tsc_offset(void)
+{
+	struct {
+		struct kvm_msrs header;
+		struct kvm_msr_entry entry;
+	} msrs0 = { .header.nmsrs = 1, .entry.index = MSR_IA32_TSC };
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_plane *plane;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	u64 tsc0, tsc1, bound;
+
+	vm = vm_create_barebones_irqchip(true);
+	enable_planes(vm);
+	vcpu = __vm_vcpu_add(vm, 0);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	TEST_ASSERT_EQ(__vcpu_ioctl(vcpu, KVM_GET_MSRS, &msrs0.header), 1);
+	tsc0 = msrs0.entry.data;
+	TEST_ASSERT_EQ(__plane_vcpu_ioctl(plane_vcpu, KVM_GET_MSRS, &msrs0.header), 1);
+	tsc1 = msrs0.entry.data;
+
+	/* One second of guest TSC; an unshared offset is off by far more. */
+	bound = (u64)__vcpu_ioctl(vcpu, KVM_GET_TSC_KHZ, NULL) * 1000;
+	TEST_ASSERT(tsc1 >= tsc0 && tsc1 - tsc0 < bound,
+		    "plane 1 TSC 0x%lx is not plane 0 TSC 0x%lx plus elapsed time",
+		    tsc1, tsc0);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("plane vCPU shares the TSC offset\n");
+}
+
 /* Offset of XMM0 in the legacy XSAVE area.  */
 #define XSTATE_BV_OFFSET	(0x200/4)
 #define XMM_OFFSET		(0xa0/4)
-#define PKRU_OFFSET		(0xa80/4)
 
 static void test_plane_fpu_nonshared(void)
 {
@@ -64,6 +119,7 @@ static void test_plane_fpu_nonshared(void)
 	struct kvm_xsave xsave0, xsave1;
 
 	vm = vm_create_barebones_irqchip(true);
+	enable_planes(vm);
 
 	vcpu = __vm_vcpu_add(vm, 0);
 	vcpu_init_cpuid(vcpu, kvm_get_supported_cpuid());
@@ -90,6 +146,7 @@ static void test_plane_fpu_nonshared(void)
 	plane_vcpu_ioctl(plane_vcpu, KVM_GET_XSAVE, &xsave1);
 	TEST_ASSERT_EQ(xsave1.region[XMM_OFFSET], 0x87654321);
 
+	kvm_vm_free(vm);
 	ksft_test_result_pass("get/set FPU not shared across planes\n");
 }
 
@@ -98,8 +155,9 @@ static void test_plane_fpu_nonshared(void)
 
 #define MYVEC			192
 
+/* Physical destination mode: destination id in address bits 19:12. */
 #define MAKE_MSI(cpu, vector) ((struct kvm_msi){			\
-	.address_lo = APIC_DEFAULT_GPA + (((cpu) & 0xff) << 8),		\
+	.address_lo = APIC_DEFAULT_GPA + (((cpu) & 0xff) << 12),	\
 	.address_hi = (cpu) & ~0xff,					\
 	.data = (vector),						\
 })
@@ -131,6 +189,7 @@ static void test_plane_msi(void)
 	struct kvm_lapic_state lapic0, lapic1;
 
 	vm = vm_create_barebones_irqchip(true);
+	enable_planes(vm);
 
 	vcpu = __vm_vcpu_add(vm, 0);
 	vcpu_init_cpuid(vcpu, kvm_get_supported_cpuid());
@@ -172,22 +231,95 @@ static void test_plane_msi(void)
 	ksft_test_result_pass("signal MSI routed per plane\n");
 }
 
-int main(int argc, char *argv[])
+/*
+ * MP_STATE is per plane vCPU: a plane vCPU whose id is not the BSP's starts
+ * uninitialized while its plane-0 sibling runs; setting it does not touch the
+ * sibling; an INIT signalled to the plane's LAPIC is accepted on the plane fd.
+ */
+static void test_plane_mp_state(void)
 {
-	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
-	int cap_planes = vm_check_cap(vm, KVM_CAP_PLANES);
+	struct kvm_vm *vm;
+	struct kvm_vcpu *vcpu0, *vcpu1;
+	struct kvm_plane *plane;
+	struct kvm_plane_vcpu *plane_vcpu0, *plane_vcpu1;
+	struct kvm_mp_state mp_state;
+	struct kvm_msi init_msi = MAKE_MSI(1, 0);
+	int r;
+
+	vm = vm_create_barebones_irqchip(true);
+	enable_planes(vm);
+
+	vcpu0 = __vm_vcpu_add(vm, 0);
+	vcpu_init_cpuid(vcpu0, kvm_get_supported_cpuid());
+	vcpu_set_cpuid(vcpu0);
+	vcpu1 = __vm_vcpu_add(vm, 1);
+	vcpu_init_cpuid(vcpu1, kvm_get_supported_cpuid());
+	vcpu_set_cpuid(vcpu1);
+
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu0 = __vm_plane_vcpu_add(vcpu0, plane);
+	plane_vcpu1 = __vm_plane_vcpu_add(vcpu1, plane);
+
+	/* BSP id starts runnable in every plane, the others uninitialized. */
+	plane_vcpu_ioctl(plane_vcpu0, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_RUNNABLE);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_UNINITIALIZED);
+	vcpu_ioctl(vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_UNINITIALIZED);
+
+	/* Setting plane 1's state leaves plane 0's alone, and vice versa. */
+	mp_state.mp_state = KVM_MP_STATE_RUNNABLE;
+	plane_vcpu_ioctl(plane_vcpu1, KVM_SET_MP_STATE, &mp_state);
+	vcpu_ioctl(vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_UNINITIALIZED);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_RUNNABLE);
+
+	mp_state.mp_state = KVM_MP_STATE_HALTED;
+	vcpu_ioctl(vcpu1, KVM_SET_MP_STATE, &mp_state);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_RUNNABLE);
+
+	mp_state.mp_state = KVM_MP_STATE_INIT_RECEIVED;
+	plane_vcpu_ioctl(plane_vcpu1, KVM_SET_MP_STATE, &mp_state);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_INIT_RECEIVED);
+
+	/* An INIT to the plane's LAPIC is accepted on the plane fd. */
+	init_msi.data |= APIC_DM_INIT;
+	r = __plane_ioctl(plane, KVM_SIGNAL_MSI, &init_msi);
+	TEST_ASSERT(r == 1, "INIT to plane 1 vCPU 1. ret: %d, errno: %d", r, errno);
 
 	kvm_vm_free(vm);
-	TEST_REQUIRE(cap_planes && cap_planes > 1);
+	ksft_test_result_pass("MP_STATE per plane vCPU\n");
+}
+
+int main(int argc, char *argv[])
+{
+	/*
+	 * kvm_arch_max_planes() reports 1 without a split irqchip, so the
+	 * probe VM needs one even though the opt-in itself does not.
+	 */
+	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
+	int cap_planes = 0;
+
+	if (!__vm_enable_cap(vm, KVM_CAP_PLANES, NR_PLANES))
+		cap_planes = vm_check_cap(vm, KVM_CAP_PLANES);
+
+	kvm_vm_free(vm);
+	TEST_REQUIRE(cap_planes > 1);
 
 	ksft_print_header();
-	ksft_set_plan(3);
+	ksft_set_plan(5);
 
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
 	test_plane_regs();
+	test_plane_tsc_offset();
 	test_plane_fpu_nonshared();
 	test_plane_msi();
+	test_plane_mp_state();
 
 	ksft_finished();
 }

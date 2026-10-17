@@ -89,6 +89,7 @@ struct kvm_plane_vcpu {
 	uint32_t id;
 	int fd;
 	struct kvm_vcpu *plane0;
+	struct kvm_plane *plane;
 };
 
 struct userspace_mem_regions {
@@ -164,6 +165,7 @@ struct kvm_vm {
 	struct sparsebit *vpages_valid;
 	struct sparsebit *vpages_mapped;
 	bool has_irqchip;
+	bool has_split_irqchip;
 	gpa_t ucall_mmio_addr;
 	gva_t handlers;
 	u32 dirty_ring_size;
@@ -855,6 +857,17 @@ static inline bool is_smt_on(void)
 
 void vm_create_irqchip(struct kvm_vm *vm);
 
+/*
+ * Record the irqchip mode on the VM so that kvm_vm_restart() recreates
+ * the same mode, whatever kvm_force_split_irqchip says by then.
+ */
+static inline void vm_enable_split_irqchip(struct kvm_vm *vm)
+{
+	vm_enable_cap(vm, KVM_CAP_SPLIT_IRQCHIP, 24);
+	vm->has_irqchip = true;
+	vm->has_split_irqchip = true;
+}
+
 static inline int __vm_create_guest_memfd(struct kvm_vm *vm, u64 size,
 					  u64 flags)
 {
@@ -1289,7 +1302,7 @@ static inline struct kvm_vm *vm_create_barebones_irqchip(bool split)
 	struct kvm_vm *vm = vm_create_barebones();
 
 	if (split)
-		vm_enable_cap(vm, KVM_CAP_SPLIT_IRQCHIP, 24);
+		vm_enable_split_irqchip(vm);
 	else
 		vm_create_irqchip(vm);
 
