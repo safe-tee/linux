@@ -3374,6 +3374,16 @@ static int em_lldt(struct x86_emulate_ctxt *ctxt)
 
 	/* Disable writeback. */
 	ctxt->dst.type = OP_NONE;
+
+	/*
+	 * A higher VTL's LDTR-write intercept suspends the LLDT before any
+	 * architectural effect.  Diverting here rather than in
+	 * emulator_set_segment() keeps task switches, which load LDTR
+	 * through set_segment as well, out of the intercept.
+	 */
+	if (ctxt->ops->divert_seg_write(ctxt, sel, VCPU_SREG_LDTR))
+		return X86EMUL_CONTINUE;
+
 	return load_segment_descriptor(ctxt, sel, VCPU_SREG_LDTR);
 }
 
@@ -3388,6 +3398,17 @@ static int em_ltr(struct x86_emulate_ctxt *ctxt)
 
 	/* Disable writeback. */
 	ctxt->dst.type = OP_NONE;
+
+	/*
+	 * A higher VTL's TR-write intercept suspends the LTR before any
+	 * architectural effect.  The divert must precede
+	 * load_segment_descriptor(): that path marks the TSS descriptor
+	 * busy in the GDT, and a busy descriptor would #GP the re-executed
+	 * LTR after a cooperative VTL return.
+	 */
+	if (ctxt->ops->divert_seg_write(ctxt, sel, VCPU_SREG_TR))
+		return X86EMUL_CONTINUE;
+
 	return load_segment_descriptor(ctxt, sel, VCPU_SREG_TR);
 }
 

@@ -206,6 +206,16 @@ struct x86_emulate_ops {
 			    struct desc_struct *desc, u32 *base3, int seg);
 	void (*set_segment)(struct x86_emulate_ctxt *ctxt, u16 selector,
 			    struct desc_struct *desc, u32 base3, int seg);
+	/*
+	 * Divert an LTR or LLDT into a Hyper-V VSM register-intercept exit
+	 * when the higher VTL armed one.  Returns true when the write was
+	 * diverted: the instruction must then have no architectural effect,
+	 * so this is checked before descriptor validation (and, for LTR,
+	 * the busy-bit write).  Only the instructions divert; task-switch
+	 * loads of LDTR/TR are not covered by the TLFS intercepts.
+	 */
+	bool (*divert_seg_write)(struct x86_emulate_ctxt *ctxt, u16 selector,
+				 int seg);
 	unsigned long (*get_cached_segment_base)(struct x86_emulate_ctxt *ctxt,
 						 int seg);
 	void (*get_gdt)(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt);
