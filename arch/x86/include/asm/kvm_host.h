@@ -1082,8 +1082,13 @@ enum hv_tsc_page_status {
 /* Hyper-V emulation context */
 struct kvm_hv {
 	struct mutex hv_lock;
-	u64 hv_guest_os_id;
-	u64 hv_hypercall;
+	/*
+	 * GUEST_OS_ID and the hypercall page are per-VTL instances in the
+	 * TLFS; bank them per plane so a higher VTL enabling its own
+	 * hypercall page does not clobber the lower VTL's.
+	 */
+	u64 hv_guest_os_id[KVM_MAX_PLANES];
+	u64 hv_hypercall[KVM_MAX_PLANES];
 	bool hv_forward_hcalls;
 	u64 hv_tsc_page;
 	enum hv_tsc_page_status hv_tsc_page_status;
