@@ -234,16 +234,16 @@ static void kvm_make_vcpu_request(struct kvm_vcpu *vcpu, unsigned int req,
 		 * A per-plane request raised on "the vCPU" (TLB flush after
 		 * a host-side zap, obsolete-roots reload, ...) concerns
 		 * every plane: fan it out to the twins, or the plane that
-		 * runs next consumes a bit the others still need.  Mode,
-		 * pCPU and wait are shared with the common, so the kick
-		 * logic below covers the twins too.
+		 * runs next consumes a bit the others still need.  Mode and
+		 * wait live in the common and the kick below targets the
+		 * running twin's pCPU, so it covers the twins too.
 		 */
 		if (req & KVM_REQUEST_PER_PLANE) {
 			struct kvm_vcpu *twin;
 			int p;
 
 			for (p = 0; p < KVM_MAX_PLANES; p++) {
-				twin = vcpu->common->vcpus[p];
+				twin = READ_ONCE(vcpu->common->vcpus[p]);
 				if (twin && twin != vcpu)
 					__kvm_make_request(req, twin);
 			}
@@ -264,7 +264,14 @@ static void kvm_make_vcpu_request(struct kvm_vcpu *vcpu, unsigned int req,
 	 * finalized. See kvm_vcpu_kick() for more details on handling requests.
 	 */
 	if (kvm_request_needs_ipi(vcpu, req)) {
-		cpu = READ_ONCE(vcpu->cpu);
+		/*
+		 * vcpu->cpu is per plane vCPU and kvm_arch_vcpu_load()
+		 * refreshes only the loaded twin's, so this plane's copy
+		 * can point at a pCPU the thread has long left while a
+		 * twin runs elsewhere.  The mode just checked is shared;
+		 * the IPI must go where the running twin actually is.
+		 */
+		cpu = READ_ONCE(READ_ONCE(vcpu->common->current_vcpu)->cpu);
 		if (cpu != -1 && cpu != current_cpu)
 			__cpumask_set_cpu(cpu, tmp);
 	}
@@ -4427,7 +4434,13 @@ void __kvm_vcpu_kick(struct kvm_vcpu *vcpu, bool wait)
 	 * vCPU also requires it to leave IN_GUEST_MODE.
 	 */
 	if (kvm_arch_vcpu_should_kick(vcpu)) {
-		cpu = READ_ONCE(vcpu->cpu);
+		/*
+		 * Target the running twin's pCPU: this plane's vcpu->cpu
+		 * goes stale whenever the thread migrates while another
+		 * plane is loaded, and the IN_GUEST_MODE just observed is
+		 * the (shared) mode of whichever twin runs.
+		 */
+		cpu = READ_ONCE(READ_ONCE(vcpu->common->current_vcpu)->cpu);
 		if (cpu != me && (unsigned int)cpu < nr_cpu_ids && cpu_online(cpu)) {
 			/*
 			 * Use a reschedule IPI to kick the vCPU if the caller
