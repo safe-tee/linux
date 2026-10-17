@@ -2430,7 +2430,19 @@ static int kvm_hv_hypercall_complete(struct kvm_vcpu *vcpu, u64 result)
 
 static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 {
-	return kvm_hv_hypercall_complete(vcpu, vcpu->run->hyperv.u.hcall.result);
+	u64 result = vcpu->run->hyperv.u.hcall.result;
+
+	/*
+	 * A hypercall the VMM judged malformed beyond returning a status
+	 * (such as a VTL call that is invalid in the current state) faults
+	 * at the instruction instead of completing.
+	 */
+	if (result & KVM_HV_HCALL_RESULT_RAISE_UD) {
+		kvm_queue_exception(vcpu, UD_VECTOR);
+		return 1;
+	}
+
+	return kvm_hv_hypercall_complete(vcpu, result);
 }
 
 static u16 kvm_hvcall_signal_event(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
