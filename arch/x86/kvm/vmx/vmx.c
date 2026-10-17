@@ -70,6 +70,7 @@
 #include "vmcs12.h"
 #include "vmx.h"
 #include "x86.h"
+#include "kvm_emulate.h"
 #include "x86_ops.h"
 #include "smm.h"
 #include "tss.h"
@@ -5989,6 +5990,7 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 {
 	unsigned long exit_qualification = vt_get_exit_qual(vcpu);
 	gpa_t gpa;
+	int ret;
 
 	/*
 	 * EPT violation happened while executing iret from NMI,
@@ -6015,7 +6017,54 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 	if (unlikely(allow_smaller_maxphyaddr && !kvm_vcpu_is_legal_gpa(vcpu, gpa)))
 		return kvm_emulate_instruction(vcpu, 0);
 
-	return __vt_handle_ept_violation(vcpu, gpa, exit_qualification);
+	ret = __vt_handle_ept_violation(vcpu, gpa, exit_qualification);
+
+	/*
+	 * A plane-protection fault reflected to userspace becomes a TLFS
+	 * GPA intercept message, which carries the guest-linear address
+	 * and the faulting instruction's bytes.  Harvest them while the
+	 * exit state is still at hand.
+	 */
+	if (ret == -EFAULT &&
+	    vcpu->run->exit_reason == KVM_EXIT_MEMORY_FAULT &&
+	    (vcpu->run->memory_fault.flags & (KVM_MEMORY_EXIT_FLAG_READ |
+					      KVM_MEMORY_EXIT_FLAG_WRITE |
+					      KVM_MEMORY_EXIT_FLAG_EXEC))) {
+		unsigned int len;
+
+		if (exit_qualification & EPT_VIOLATION_GVA_IS_VALID) {
+			vcpu->run->memory_fault.gva =
+				vmcs_readl(GUEST_LINEAR_ADDRESS);
+			vcpu->run->memory_fault.flags |=
+				KVM_MEMORY_EXIT_FLAG_GVA_VALID;
+		}
+		/*
+		 * Architecturally undefined for EPT violations, but the
+		 * hardware provides the faulting (for a fetch: the
+		 * fetching) instruction's length here, and the TLFS
+		 * message carries exactly that.
+		 */
+		len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+		len = min_t(unsigned int, len,
+			    sizeof(vcpu->run->memory_fault.insn_bytes));
+		vcpu->run->memory_fault.insn_len = len;
+		if (!(exit_qualification & EPT_VIOLATION_ACC_INSTR)) {
+			struct x86_exception e;
+
+			/*
+			 * kvm_read_guest_virt() takes a linear address: RIP
+			 * is CS-relative, and the two coincide only when
+			 * CS.base is zero (64-bit mode, or a flat 32-bit
+			 * code segment).
+			 */
+			if (kvm_read_guest_virt(vcpu, kvm_get_linear_rip(vcpu),
+						vcpu->run->memory_fault.insn_bytes,
+						len, &e))
+				memset(vcpu->run->memory_fault.insn_bytes, 0,
+				       sizeof(vcpu->run->memory_fault.insn_bytes));
+		}
+	}
+	return ret;
 }
 
 static int handle_ept_misconfig(struct kvm_vcpu *vcpu)

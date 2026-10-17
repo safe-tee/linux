@@ -1264,6 +1264,14 @@ out_free_plane:
 
 static void kvm_destroy_one_plane(struct kvm_plane *plane)
 {
+	int i;
+
+	for (i = 0; i < plane->nr_overlays; i++)
+		if (plane->overlays[i].page)
+			unpin_user_pages_dirty_lock(&plane->overlays[i].page,
+						    1, true);
+	plane->nr_overlays = 0;
+
 #ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
 	xa_destroy(&plane->mem_attrs);
 #endif
@@ -5729,7 +5737,14 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 	case KVM_CAP_PLANES:
 		if (kvm)
 			return kvm_arch_max_planes(kvm);
-		return 1;
+		/*
+		 * The system fd reports the ceiling a VM may opt in to via
+		 * KVM_ENABLE_CAP(KVM_CAP_PLANES); a VM fd reports what the
+		 * VM actually has.
+		 */
+		return KVM_MAX_PLANES;
+	case KVM_CAP_PLANE_MEMORY_OVERLAYS:
+		return KVM_PLANE_MAX_OVERLAYS;
 	default:
 		break;
 	}
@@ -5991,6 +6006,258 @@ do {										\
 		     sizeof_field(struct kvm_userspace_memory_region2, field));	\
 } while (0)
 
+struct page *kvm_plane_overlay_page(struct kvm_plane *plane, gfn_t gfn)
+{
+	int i, n = READ_ONCE(plane->nr_overlays);
+
+	/* pairs with the smp_wmb() publishing a new entry */
+	smp_rmb();
+	for (i = 0; i < n; i++) {
+		if (READ_ONCE(plane->overlays[i].gfn) != gfn)
+			continue;
+		/* pairs with the smp_store_release() updating an entry */
+		return smp_load_acquire(&plane->overlays[i].page);
+	}
+	return NULL;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_plane_overlay_page);
+
+unsigned long kvm_plane_overlay_uaddr(struct kvm_plane *plane, gfn_t gfn)
+{
+	int i, n = READ_ONCE(plane->nr_overlays);
+
+	smp_rmb();
+	for (i = 0; i < n; i++) {
+		if (READ_ONCE(plane->overlays[i].gfn) != gfn)
+			continue;
+		/*
+		 * The acquire pairs with the smp_store_release() updating
+		 * an entry: a reader which observes the new page also
+		 * observes the uaddr written before it.
+		 */
+		if (smp_load_acquire(&plane->overlays[i].page))
+			return READ_ONCE(plane->overlays[i].uaddr);
+		return 0;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_plane_overlay_uaddr);
+
+/*
+ * The invalidation window registered around an overlay update must
+ * cover every gfn whose in-flight fault could install a huge leaf
+ * spanning the overlaid gfn, i.e. the naturally-aligned region of the
+ * widest stage-2 huge mapping any plane-capable architecture supports
+ * (a 1GiB page on x86).  A narrower window lets a racing fault on a
+ * neighbouring gfn, which sampled nr_overlays and mmu_invalidate_seq
+ * before the update, pass mmu_invalidate_retry_gfn() and install a
+ * huge SPTE over the overlay after the zap.
+ */
+#define KVM_PLANE_OVERLAY_INVAL_PAGES	(SZ_1G >> PAGE_SHIFT)
+
+static void kvm_plane_overlay_invalidate_add(struct kvm *kvm, gfn_t gfn)
+{
+	gfn_t start = ALIGN_DOWN(gfn, KVM_PLANE_OVERLAY_INVAL_PAGES);
+
+	kvm_mmu_invalidate_range_add(kvm, start,
+				     start + KVM_PLANE_OVERLAY_INVAL_PAGES);
+}
+
+/*
+ * Drop every translation of @gfn, in all address spaces and all planes'
+ * roots.  A huge leaf spanning the gfn intersects the single-page range
+ * and is zapped with it.  Hardware TLBs are not flushed here.
+ */
+static void kvm_plane_overlay_unmap(struct kvm *kvm, gfn_t gfn)
+{
+#ifdef CONFIG_KVM_GENERIC_MMU_NOTIFIER
+	struct kvm_memslot_iter iter;
+	struct kvm_memslots *slots;
+	int i;
+
+	KVM_MMU_LOCK(kvm);
+	for (i = 0; i < kvm_arch_nr_memslot_as_ids(kvm); i++) {
+		slots = __kvm_memslots(kvm, i);
+
+		kvm_for_each_memslot_in_gfn_range(&iter, slots, gfn, gfn + 1) {
+			struct kvm_gfn_range range = {
+				.slot = iter.slot,
+				.start = gfn,
+				.end = gfn + 1,
+				.attr_filter = KVM_FILTER_PRIVATE |
+					       KVM_FILTER_SHARED,
+				.may_block = true,
+			};
+
+			kvm_unmap_gfn_range(kvm, &range);
+		}
+	}
+	KVM_MMU_UNLOCK(kvm);
+#else
+	kvm_arch_flush_shadow_all(kvm);
+#endif
+}
+
+static int kvm_vm_ioctl_set_plane_overlay(struct kvm *kvm,
+					  struct kvm_plane_memory_overlay *ov)
+{
+	struct kvm_plane_overlay *e = NULL;
+	struct page *page = NULL, *old_page = NULL;
+	struct kvm_plane *plane;
+	bool moved = false;
+	gfn_t moved_gfn = 0;
+	int i, r;
+
+	if (ov->flags || ov->plane >= KVM_MAX_PLANES)
+		return -EINVAL;
+	if (ov->uaddr & ~PAGE_MASK)
+		return -EINVAL;
+	plane = kvm->planes[ov->plane];
+	if (!plane)
+		return -EINVAL;
+
+	if (ov->uaddr) {
+		r = pin_user_pages_fast(ov->uaddr, 1,
+					FOLL_WRITE | FOLL_LONGTERM, &page);
+		if (r != 1)
+			return r < 0 ? r : -EFAULT;
+	}
+
+	mutex_lock(&kvm->slots_lock);
+	for (i = 0; i < plane->nr_overlays; i++) {
+		if (plane->overlays[i].gfn == ov->gfn) {
+			e = &plane->overlays[i];
+			break;
+		}
+	}
+
+	/*
+	 * Removing an overlay which was never installed changes nothing;
+	 * don't zap and flush for it.
+	 */
+	if (!ov->uaddr && !e) {
+		mutex_unlock(&kvm->slots_lock);
+		return 0;
+	}
+
+	/*
+	 * guest_memfd-backed and private gfns have their own backing
+	 * contract which an ordinary pinned user page cannot substitute
+	 * for, and kvm_mmu_faultin_pfn_gmem() does not consult overlays.
+	 * Both the private attribute and the memslot flags are stable
+	 * under slots_lock.
+	 */
+	if (ov->uaddr) {
+		struct kvm_memory_slot *slot = gfn_to_memslot(kvm, ov->gfn);
+
+		if ((slot && kvm_memslot_is_gmem_only(slot)) ||
+		    kvm_is_private_gfn(kvm, ov->gfn)) {
+			mutex_unlock(&kvm->slots_lock);
+			unpin_user_page(page);
+			return -EINVAL;
+		}
+	}
+
+	if (ov->uaddr) {
+		if (!e) {
+			if (plane->nr_overlays >= KVM_PLANE_MAX_OVERLAYS) {
+				mutex_unlock(&kvm->slots_lock);
+				unpin_user_page(page);
+				return -ENOSPC;
+			}
+			e = &plane->overlays[plane->nr_overlays];
+			e->gfn = ov->gfn;
+			e->uaddr = ov->uaddr;
+			e->page = page;
+			/*
+			 * Publish the fully-initialised entry before
+			 * raising the count; pairs with the smp_rmb() in
+			 * the lockless readers.
+			 */
+			smp_wmb();
+			WRITE_ONCE(plane->nr_overlays, plane->nr_overlays + 1);
+		} else {
+			old_page = e->page;
+			WRITE_ONCE(e->uaddr, ov->uaddr);
+			/*
+			 * Order the uaddr store before the page store; a
+			 * reader which acquires the new page must see the
+			 * uaddr it belongs to.
+			 */
+			smp_store_release(&e->page, page);
+		}
+	} else if (e) {
+		struct kvm_plane_overlay *tail =
+			&plane->overlays[plane->nr_overlays - 1];
+
+		old_page = e->page;
+		WRITE_ONCE(e->page, NULL);
+		WRITE_ONCE(e->uaddr, 0);
+
+		/*
+		 * Reclaim the slot: move the tail entry into the vacated
+		 * one and shrink the array.  A lockless reader scanning
+		 * with the old count can miss the moved entry entirely
+		 * (it may already have passed the vacated slot), so the
+		 * moved gfn is added to the invalidation window below and
+		 * any such in-flight fault retries.  The cleared tail is
+		 * harmless to a stale-count reader: the live copy sits at
+		 * a lower index and is found first.
+		 */
+		if (e != tail) {
+			moved = true;
+			moved_gfn = tail->gfn;
+			WRITE_ONCE(e->gfn, tail->gfn);
+			WRITE_ONCE(e->uaddr, tail->uaddr);
+			/* pairs with smp_load_acquire() in the readers */
+			smp_store_release(&e->page, tail->page);
+		}
+		WRITE_ONCE(plane->nr_overlays, plane->nr_overlays - 1);
+		WRITE_ONCE(tail->page, NULL);
+		WRITE_ONCE(tail->uaddr, 0);
+		WRITE_ONCE(tail->gfn, 0);
+	}
+	/*
+	 * Bump the invalidation sequence across the update and zap: a
+	 * concurrent fault resolves the overlay pfn locklessly before
+	 * taking mmu_lock, and without a sequence change
+	 * is_page_fault_stale() would let it install an SPTE for the OLD
+	 * backing after the zap, mapping a page this function is about
+	 * to unpin.
+	 */
+	KVM_MMU_LOCK(kvm);
+	kvm_mmu_invalidate_start(kvm);
+	kvm_plane_overlay_invalidate_add(kvm, ov->gfn);
+	if (moved)
+		kvm_plane_overlay_invalidate_add(kvm, moved_gfn);
+	KVM_MMU_UNLOCK(kvm);
+
+	mutex_unlock(&kvm->slots_lock);
+
+	/*
+	 * Drop any translation mapping the old or new backing.  The unmap
+	 * removes the SPTEs but does not flush hardware TLBs: a vCPU that
+	 * mapped the gfn before the update still holds a translation to
+	 * the old backing in its TLB (tagged by the live ASID on SVM,
+	 * which nothing else invalidates).  Flush before the old page is
+	 * unpinned: KVM_REQ_TLB_FLUSH is a per-plane request, so the
+	 * fan-out in kvm_make_vcpu_request() reaches every plane twin and
+	 * each flushes its own hardware context.
+	 */
+	kvm_plane_overlay_unmap(kvm, ov->gfn);
+	if (moved)
+		kvm_plane_overlay_unmap(kvm, moved_gfn);
+	kvm_flush_remote_tlbs(kvm);
+
+	KVM_MMU_LOCK(kvm);
+	kvm_mmu_invalidate_end(kvm);
+	KVM_MMU_UNLOCK(kvm);
+
+	if (old_page)
+		unpin_user_pages_dirty_lock(&old_page, 1, true);
+	return 0;
+}
+
 static long kvm_vm_ioctl(struct file *filp,
 			   unsigned int ioctl, unsigned long arg)
 {
@@ -6001,6 +6268,15 @@ static long kvm_vm_ioctl(struct file *filp,
 	if (kvm->mm != current->mm || kvm->vm_dead)
 		return -EIO;
 	switch (ioctl) {
+	case KVM_SET_PLANE_MEMORY_OVERLAY: {
+		struct kvm_plane_memory_overlay ov;
+
+		r = -EFAULT;
+		if (copy_from_user(&ov, argp, sizeof(ov)))
+			goto out;
+		r = kvm_vm_ioctl_set_plane_overlay(kvm, &ov);
+		break;
+	}
 	case KVM_CREATE_PLANE:
 		r = kvm_vm_ioctl_create_plane(kvm, arg);
 		break;

@@ -917,8 +917,25 @@ struct kvm_plane {
 	struct xarray mem_attrs;
 #endif
 
+	/*
+	 * VSM overlay pages: per-plane gfn -> pinned user page overriding
+	 * the memslot translation for this plane only.  Written under
+	 * kvm->slots_lock; readers tolerate a transient stale view, the
+	 * post-update zap makes the EPT coherent.
+	 */
+#define KVM_PLANE_MAX_OVERLAYS 64
+	struct kvm_plane_overlay {
+		gfn_t gfn;
+		unsigned long uaddr;
+		struct page *page;
+	} overlays[KVM_PLANE_MAX_OVERLAYS];
+	int nr_overlays;
+
 	struct kvm_arch_plane arch;
 };
+
+struct page *kvm_plane_overlay_page(struct kvm_plane *plane, gfn_t gfn);
+unsigned long kvm_plane_overlay_uaddr(struct kvm_plane *plane, gfn_t gfn);
 
 struct kvm {
 #ifdef KVM_HAVE_MMU_RWLOCK

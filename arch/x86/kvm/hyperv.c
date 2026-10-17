@@ -253,16 +253,8 @@ static void synic_exit(struct kvm_vcpu_hv_synic *synic, u32 msr)
 	struct kvm_vcpu *vcpu = hv_synic_to_vcpu(synic);
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
 
-	/*
-	 * Userspace's SynIC device models plane 0 only; a higher plane's
-	 * exit would be mistaken for a plane-0 page move and relocate the
-	 * overlay the VMM keeps for SIMP/SIEFP.  Higher-plane SynICs are
-	 * handled fully in-kernel.
-	 */
-	if (vcpu->plane_level)
-		return;
-
 	hv_vcpu->exit.type = KVM_EXIT_HYPERV_SYNIC;
+	hv_vcpu->exit.plane = vcpu->plane_level;
 	hv_vcpu->exit.u.synic.msr = msr;
 	hv_vcpu->exit.u.synic.control = synic->control;
 	hv_vcpu->exit.u.synic.evt_page = synic->evt_page;
@@ -364,6 +356,7 @@ static void syndbg_exit(struct kvm_vcpu *vcpu, u32 msr)
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
 
 	hv_vcpu->exit.type = KVM_EXIT_HYPERV_SYNDBG;
+	hv_vcpu->exit.plane = vcpu->plane_level;
 	hv_vcpu->exit.u.syndbg.msr = msr;
 	hv_vcpu->exit.u.syndbg.control = syndbg->control.control;
 	hv_vcpu->exit.u.syndbg.send_page = syndbg->control.send_page;
@@ -798,6 +791,51 @@ static int stimer_get_count(struct kvm_vcpu_hv_stimer *stimer, u64 *pcount)
 	return 0;
 }
 
+/*
+ * SIMP accessors: a plane overlay page, when installed by userspace,
+ * carries the live message page for this plane; the memslot holds only
+ * the underlay the other planes see.
+ */
+static int synic_msg_page_read(struct kvm_vcpu *vcpu, gfn_t gfn, void *data,
+			       int offset, int len)
+{
+	unsigned long uaddr = kvm_plane_overlay_uaddr(vcpu->plane, gfn);
+
+	if (uaddr)
+		return copy_from_user(data, (void __user *)(uaddr + offset),
+				      len) ? -EFAULT : 0;
+	/*
+	 * Mirror the write side: without an overlay a higher plane's
+	 * message page is backed by underlay memory that plane 0 controls.
+	 * Deciding deliverability from plane-0-writable bytes would let a
+	 * lower VTL plant a non-HVMSG_NONE type and silently swallow a
+	 * no_retry (periodic stimer) message; fail so the delivery is
+	 * retried once the overlay appears.
+	 */
+	if (vcpu->plane_level)
+		return -EFAULT;
+	return kvm_vcpu_read_guest_page(vcpu, gfn, data, offset, len);
+}
+
+static int synic_msg_page_write(struct kvm_vcpu *vcpu, gfn_t gfn,
+				const void *data, int offset, int len)
+{
+	unsigned long uaddr = kvm_plane_overlay_uaddr(vcpu->plane, gfn);
+
+	if (uaddr)
+		return copy_to_user((void __user *)(uaddr + offset), data,
+				    len) ? -EFAULT : 0;
+	/*
+	 * Never write a higher plane's messages into guest RAM: without an
+	 * overlay installed that memory is the underlay every other plane
+	 * sees, and silently corrupting plane-0-owned pages is far worse
+	 * than retrying the message once the overlay appears.
+	 */
+	if (vcpu->plane_level)
+		return -EFAULT;
+	return kvm_vcpu_write_guest_page(vcpu, gfn, data, offset, len);
+}
+
 static int synic_deliver_msg(struct kvm_vcpu_hv_synic *synic, u32 sint,
 			     struct hv_message *src_msg, bool no_retry)
 {
@@ -818,10 +856,10 @@ static int synic_deliver_msg(struct kvm_vcpu_hv_synic *synic, u32 sint,
 	 * is only called in vcpu context so the entire update is atomic from
 	 * guest POV and thus the exact order here doesn't matter.
 	 */
-	r = kvm_vcpu_read_guest_page(vcpu, msg_page_gfn, &hv_hdr.message_type,
-				     msg_off + offsetof(struct hv_message,
-							header.message_type),
-				     sizeof(hv_hdr.message_type));
+	r = synic_msg_page_read(vcpu, msg_page_gfn, &hv_hdr.message_type,
+				msg_off + offsetof(struct hv_message,
+						   header.message_type),
+				sizeof(hv_hdr.message_type));
 	if (r < 0)
 		return r;
 
@@ -831,21 +869,20 @@ static int synic_deliver_msg(struct kvm_vcpu_hv_synic *synic, u32 sint,
 
 		hv_hdr.message_flags.asu8 = 0;
 		hv_hdr.message_flags.msg_pending = 1;
-
-		r = kvm_vcpu_write_guest_page(vcpu, msg_page_gfn,
-					      &hv_hdr.message_flags,
-					      msg_off +
-					      offsetof(struct hv_message,
-						       header.message_flags),
-					      sizeof(hv_hdr.message_flags));
+		r = synic_msg_page_write(vcpu, msg_page_gfn,
+					 &hv_hdr.message_flags,
+					 msg_off +
+					 offsetof(struct hv_message,
+						  header.message_flags),
+					 sizeof(hv_hdr.message_flags));
 		if (r < 0)
 			return r;
 		return -EAGAIN;
 	}
 
-	r = kvm_vcpu_write_guest_page(vcpu, msg_page_gfn, src_msg, msg_off,
-				      sizeof(src_msg->header) +
-				      src_msg->header.payload_size);
+	r = synic_msg_page_write(vcpu, msg_page_gfn, src_msg, msg_off,
+				 sizeof(src_msg->header) +
+				 src_msg->header.payload_size);
 	if (r < 0)
 		return r;
 

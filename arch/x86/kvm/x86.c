@@ -5824,8 +5824,10 @@ static bool hv_divert_dt_write(struct x86_emulate_ctxt *ctxt, u32 hv_reg,
 
 #define HV_CR_INTERCEPT_GDTR_WRITE	BIT_ULL(15)
 #define HV_CR_INTERCEPT_IDTR_WRITE	BIT_ULL(16)
+#define HV_CR_INTERCEPT_LDTR_WRITE	BIT_ULL(17)
 #define HV_X64_REGISTER_IDTR_ID		0x00070000
 #define HV_X64_REGISTER_GDTR_ID		0x00070001
+#define HV_X64_REGISTER_LDTR_ID		0x00060006
 
 static void emulator_set_gdt(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt)
 {
@@ -5912,6 +5914,18 @@ static void emulator_set_segment(struct x86_emulate_ctxt *ctxt, u16 selector,
 	var.present = desc->p;
 	var.unusable = !var.present;
 	var.padding = 0;
+
+	if (seg == VCPU_SREG_LDTR) {
+		struct desc_ptr sel_as_dt = {
+			.address = selector,
+			.size = 0,
+		};
+
+		/* The intercept message carries the written selector. */
+		if (hv_divert_dt_write(ctxt, HV_X64_REGISTER_LDTR_ID,
+				       &sel_as_dt, HV_CR_INTERCEPT_LDTR_WRITE))
+			return;
+	}
 
 	kvm_set_segment(vcpu, &var, seg);
 	return;

@@ -1828,8 +1828,29 @@ void kvm_tdp_mmu_recover_huge_pages(struct kvm *kvm,
 	struct kvm_mmu_page *root;
 
 	lockdep_assert_held_read(&kvm->mmu_lock);
-	for_each_valid_tdp_mmu_root_yield_safe(kvm, root, slot->as_id)
+	for_each_valid_tdp_mmu_root_yield_safe(kvm, root, slot->as_id) {
+		/*
+		 * kvm_mmu_max_mapping_level() consults only plane-0 state
+		 * (lpage_info and plane-0 private attributes).  Nonzero
+		 * planes carry per-plane memory attributes and memory
+		 * overlays whose fault-time 4KiB clamps a huge SPTE would
+		 * undo, extending one page's protections or overlay
+		 * backing over gfns the plane maps differently.  Leave
+		 * those roots alone; their fault path rebuilds mappings at
+		 * the largest level the plane allows.
+		 *
+		 * Plane 0 can carry overlays too (kvm->planes[0] always
+		 * exists and KVM_SET_PLANE_MEMORY_OVERLAY accepts plane 0),
+		 * and the same reasoning applies: a recovered huge SPTE
+		 * would either span an overlaid gfn with the memslot
+		 * backing, or huge-align the pinned overlay page's pfn and
+		 * map ~2MiB of unrelated host memory around it.
+		 */
+		if (root->role.plane ||
+		    READ_ONCE(kvm->planes[root->role.plane]->nr_overlays))
+			continue;
 		recover_huge_pages_range(kvm, root, slot);
+	}
 }
 
 /*

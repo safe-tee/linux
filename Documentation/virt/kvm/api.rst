@@ -6892,6 +6892,38 @@ stop policy.
 The run state is distinct from KVM_GET/SET_MP_STATE, which describes
 the architectural state of a vCPU within its plane.
 
+4.149 KVM_SET_PLANE_MEMORY_OVERLAY
+----------------------------------
+
+:Capability: KVM_CAP_PLANE_MEMORY_OVERLAYS
+:Architectures: x86
+:Type: vm ioctl
+:Parameters: struct kvm_plane_memory_overlay (in)
+:Returns: 0 on success, <0 on error
+
+::
+
+  struct kvm_plane_memory_overlay {
+	__u32 plane;
+	__u32 flags;
+	__u64 gfn;
+	__u64 uaddr;		/* page-aligned; 0 removes the overlay */
+  };
+
+Installs, replaces or removes a memory overlay for a single guest page
+frame on one plane.  While an overlay is installed, translations of
+'gfn' for vCPUs of 'plane' resolve to the (pinned) page at 'uaddr' in
+the calling process instead of to the memslot backing; other planes are
+unaffected.  Hyper-V VSM uses this for per-VTL overlay pages such as
+the SynIC message and event-flags pages.
+
+'flags' must be zero and 'uaddr' must be page-aligned.  At most
+KVM_CHECK_EXTENSION(KVM_CAP_PLANE_MEMORY_OVERLAYS) distinct gfns can
+carry an overlay per plane at any one time; further installs fail with
+-ENOSPC until an overlay is removed.  An overlay cannot be installed
+over a private or guest_memfd-only gfn (-EINVAL).  Passing 'uaddr' == 0
+removes the overlay for 'gfn', if any.
+
 5. The kvm_run structure
 ========================
 
@@ -7622,9 +7654,15 @@ spec refer, https://github.com/riscv/riscv-sbi-doc.
   #define KVM_MEMORY_EXIT_FLAG_WRITE    (1ULL << 1)
   #define KVM_MEMORY_EXIT_FLAG_EXEC     (1ULL << 2)
   #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
+  #define KVM_MEMORY_EXIT_FLAG_GVA_VALID	(1ULL << 4)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
+			/* set on plane-protection faults when available */
+			__u64 gva;
+			__u32 insn_len;
+			__u8  insn_bytes[16];
+			__u32 pad;
 		} memory_fault;
 
 KVM_EXIT_MEMORY_FAULT indicates the vCPU has encountered a memory fault that
@@ -7637,6 +7675,14 @@ describes properties of the faulting access that are likely pertinent:
  - KVM_MEMORY_EXIT_FLAG_PRIVATE - When set, indicates the memory fault occurred
    on a private memory access.  When clear, indicates the fault occurred on a
    shared access.
+ - KVM_MEMORY_EXIT_FLAG_GVA_VALID - When set, 'gva' holds the faulting guest
+   virtual address.
+
+The 'gva', 'insn_len' and 'insn_bytes' fields exist only on kernels
+which advertise KVM_CAP_PLANE_MEMORY_OVERLAYS (see section 8.48).  On
+plane memory-protection faults, 'insn_len' and 'insn_bytes' carry a
+best-effort copy of the faulting instruction when KVM could fetch it;
+an 'insn_len' of 0 means no instruction bytes are available.
 
 Note!  KVM_EXIT_MEMORY_FAULT is unique among all KVM exit reasons in that it
 accompanies a return code of '-1', not '0'!  errno will always be set to EFAULT
@@ -9954,6 +10000,22 @@ take care to differentiate between these cases.
 
 The presence of this capability indicates that the nested KVM guest can
 start in ESA mode.
+
+8.48 KVM_CAP_PLANE_MEMORY_OVERLAYS
+----------------------------------
+
+:Architectures: x86
+
+A positive return from KVM_CHECK_EXTENSION(KVM_CAP_PLANE_MEMORY_OVERLAYS)
+announces two things:
+
+ - The KVM_SET_PLANE_MEMORY_OVERLAY vm ioctl (section 4.149).  The
+   returned value is the number of gfns which can carry an overlay
+   simultaneously on each plane.
+
+ - The extended KVM_EXIT_MEMORY_FAULT layout: 'memory_fault' carries
+   the additional 'gva', 'insn_len' and 'insn_bytes' fields, with
+   KVM_MEMORY_EXIT_FLAG_GVA_VALID qualifying 'gva' (see section 5).
 
 9. Known KVM API problems
 =========================
