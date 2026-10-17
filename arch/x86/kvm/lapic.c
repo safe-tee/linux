@@ -1448,6 +1448,26 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 
 		kvm_x86_call(deliver_interrupt)(apic, delivery_mode,
 						trig_mode, vector);
+
+		/*
+		 * An interrupt for a higher plane must preempt a lower
+		 * plane running on the same vCPU: kicking only the (stopped)
+		 * target twin wakes a blocked sibling via the shared wait,
+		 * but a sibling executing in guest mode needs an explicit
+		 * kick to re-evaluate pending higher-plane events.
+		 */
+		if (vcpu->plane_level) {
+			struct kvm_vcpu *twin;
+			int p;
+
+			for (p = 0; p < vcpu->plane_level; p++) {
+				twin = vcpu->common->vcpus[p];
+				if (twin) {
+					kvm_make_request(KVM_REQ_UNBLOCK, twin);
+					kvm_vcpu_kick(twin);
+				}
+			}
+		}
 		break;
 
 	case APIC_DM_REMRD:
@@ -2088,6 +2108,24 @@ static void apic_timer_expired(struct kvm_lapic *apic, bool from_timer_fn)
 	kvm_make_request(KVM_REQ_UNBLOCK, vcpu);
 	if (from_timer_fn)
 		kvm_vcpu_kick(vcpu);
+
+	/*
+	 * A pending timer on a suspended higher plane only gets injected
+	 * once that plane runs again; kick the lower twins so the running
+	 * one re-evaluates pending higher-plane events and forces entry.
+	 */
+	if (vcpu->plane_level) {
+		struct kvm_vcpu *twin;
+		int p;
+
+		for (p = 0; p < vcpu->plane_level; p++) {
+			twin = vcpu->common->vcpus[p];
+			if (twin) {
+				kvm_make_request(KVM_REQ_UNBLOCK, twin);
+				kvm_vcpu_kick(twin);
+			}
+		}
+	}
 }
 
 static void start_sw_tscdeadline(struct kvm_lapic *apic)
@@ -3161,7 +3199,13 @@ int kvm_create_lapic(struct kvm_vcpu *vcpu)
 	 * that vCPU creation is guaranteed to run with a deterministic value,
 	 * the request will ensure the vCPU gets the correct state before VM-Entry.
 	 */
-	if (enable_apicv) {
+	/*
+	 * Higher-plane twins are software-switched and mostly suspended;
+	 * hardware interrupt virtualization on them only leaves pending
+	 * vectors in the PIR where a suspended plane's state cannot be
+	 * reliably observed.  Keep them on the legacy delivery path.
+	 */
+	if (enable_apicv && !vcpu->plane_level) {
 		apic->apicv_active = true;
 		kvm_make_request(KVM_REQ_APICV_UPDATE, vcpu);
 	}
