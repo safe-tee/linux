@@ -798,6 +798,28 @@ int __kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr)
 
 	vcpu->arch.xcr0 = xcr0;
 
+	/*
+	 * XCR0/XFEM is shared across VTLs (TLFS 15.4; the reference host
+	 * banks no vector state): propagate the new value to every plane
+	 * twin so the other VTLs observe it.  This covers both guest
+	 * XSETBV and the KVM_SET_XCRS ioctl path.  The CPUID dirty marker
+	 * below lives in the shared common state, so one set covers the
+	 * twins too.
+	 *
+	 * Skip the fan-out until this vCPU is published in
+	 * common->vcpus[]: the architectural reset of a twin still being
+	 * created must not clobber a live sibling's XCR0 (the new twin
+	 * inherits the shared value instead, in kvm_arch_vcpu_create()).
+	 */
+	if (vcpu->common &&
+	    vcpu->common->vcpus[vcpu->plane_level] == vcpu) {
+		struct kvm_vcpu *twin;
+		int i;
+
+		vcpu_for_each_plane(vcpu->common, i, twin)
+			twin->arch.xcr0 = xcr0;
+	}
+
 	if ((xcr0 ^ old_xcr0) & XFEATURE_MASK_EXTEND)
 		cpuid_set_dirty(vcpu);
 	return 0;
@@ -10228,6 +10250,14 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	kvm_vcpu_after_set_cpuid(vcpu);
 	kvm_set_tsc_khz(vcpu, vcpu->kvm->arch.default_tsc_khz);
 	kvm_vcpu_reset(vcpu, false);
+	/*
+	 * XCR0 is shared across planes.  A twin created after its plane-0
+	 * sibling has run (Hyper-V VSM enables VTL1 at runtime) inherits
+	 * the current shared value; the architectural reset value only
+	 * stands when no sibling exists yet.
+	 */
+	if (vcpu->plane_level && vcpu->common->vcpus[0])
+		vcpu->arch.xcr0 = vcpu->common->vcpus[0]->arch.xcr0;
 	kvm_init_mmu(vcpu);
 	vcpu_put(vcpu);
 	return 0;
