@@ -1055,6 +1055,7 @@ int kvm_hv_vcpu_init(struct kvm_vcpu *vcpu)
 		return -ENOMEM;
 
 	hv_vcpu->vcpu = vcpu;
+	hv_vcpu->waiting_on = -1;
 
 	synic_init(&hv_vcpu->synic);
 
@@ -3785,4 +3786,31 @@ int kvm_get_hv_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid2 *cpuid,
 		return -EFAULT;
 
 	return 0;
+}
+
+void kvm_hv_vcpu_suspend_tlb_flush(struct kvm_vcpu *vcpu, int vcpu_id)
+{
+	/* waiting_on's store should happen before suspended's */
+	WRITE_ONCE(vcpu->arch.hyperv->waiting_on, vcpu_id);
+	WRITE_ONCE(vcpu->arch.hyperv->suspended, true);
+}
+
+void kvm_hv_vcpu_unsuspend_tlb_flush(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_hv *vcpu_hv;
+	struct kvm_vcpu *v;
+	unsigned long i;
+
+	plane_for_each_vcpu(i, v, vcpu->plane) {
+		vcpu_hv = to_hv_vcpu(v);
+
+		if (vcpu_hv && kvm_hv_vcpu_suspended(v) &&
+		    READ_ONCE(vcpu_hv->waiting_on) == vcpu->vcpu_id) {
+			/* waiting_on's store should happen before suspended's */
+			WRITE_ONCE(vcpu_hv->waiting_on, -1);
+			WRITE_ONCE(vcpu_hv->suspended, false);
+			kvm_make_request(KVM_REQ_EVENT, v);
+			kvm_vcpu_kick(v);
+		}
+	}
 }

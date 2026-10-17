@@ -9225,7 +9225,7 @@ out:
 static bool kvm_vcpu_running(struct kvm_vcpu *vcpu)
 {
 	return (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
-		!vcpu->arch.apf.halted);
+		!vcpu->arch.apf.halted && !kvm_hv_vcpu_suspended(vcpu));
 }
 
 bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
@@ -10054,10 +10054,10 @@ int kvm_arch_vcpu_ioctl_translate(struct kvm_vcpu *vcpu,
 	 * is answered from this ioctl, and the reference hypervisor walks
 	 * with PFERR_WRITE_MASK and no user bit.
 	 */
-	tr->writeable = vcpu->arch.walk_mmu->gva_to_gpa(vcpu,
-							vcpu->arch.walk_mmu,
-							vaddr, PFERR_WRITE_MASK,
-							NULL) != INVALID_GPA;
+	tr->writeable = vcpu->arch.gva_walk.gva_to_gpa(vcpu,
+						     &vcpu->arch.gva_walk,
+						     vaddr, PFERR_WRITE_MASK,
+						     NULL) != INVALID_GPA;
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 	tr->physical_address = gpa;
 	tr->valid = gpa != INVALID_GPA;

@@ -129,6 +129,9 @@ struct kvm_vcpu_hv {
 	u64 vtl_entry_rax;
 	u64 vtl_entry_rcx;
 	bool vtl_entry_regs_valid;
+
+	bool suspended;
+	int waiting_on;
 };
 
 /* "Hv#1" signature */
@@ -352,6 +355,15 @@ static inline bool guest_hv_cpuid_has_l2_tlb_flush(struct kvm_vcpu *vcpu)
 		(hv_vcpu->cpuid_cache.nested_eax & HV_X64_NESTED_DIRECT_FLUSH);
 }
 
+void kvm_hv_vcpu_suspend_tlb_flush(struct kvm_vcpu *vcpu, int vcpu_id);
+void kvm_hv_vcpu_unsuspend_tlb_flush(struct kvm_vcpu *vcpu);
+
+static inline bool kvm_hv_vcpu_suspended(struct kvm_vcpu *vcpu)
+{
+	return vcpu->arch.hyperv_enabled &&
+	       READ_ONCE(vcpu->arch.hyperv->suspended);
+}
+
 static inline bool kvm_hv_is_tlb_flush_hcall(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
@@ -430,6 +442,12 @@ static inline bool kvm_hv_invtsc_suppressed(struct kvm_vcpu *vcpu)
 }
 static inline void kvm_hv_set_cpuid(struct kvm_vcpu *vcpu, bool hyperv_enabled) {}
 static inline bool kvm_hv_has_stimer_pending(struct kvm_vcpu *vcpu)
+{
+	return false;
+}
+static inline void kvm_hv_vcpu_suspend_tlb_flush(struct kvm_vcpu *vcpu, int vcpu_id) {}
+static inline void kvm_hv_vcpu_unsuspend_tlb_flush(struct kvm_vcpu *vcpu) {}
+static inline bool kvm_hv_vcpu_suspended(struct kvm_vcpu *vcpu)
 {
 	return false;
 }
