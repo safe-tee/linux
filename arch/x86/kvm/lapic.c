@@ -1460,6 +1460,7 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 			struct kvm_vcpu *twin;
 			int p;
 
+			WRITE_ONCE(vcpu->arch.hv_apic_event_pending, true);
 			for (p = 0; p < vcpu->plane_level; p++) {
 				twin = vcpu->common->vcpus[p];
 				if (twin) {
@@ -1486,8 +1487,31 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 
 	case APIC_DM_NMI:
 		result = 1;
-		kvm_inject_nmi(vcpu);
-		kvm_vcpu_kick(vcpu);
+		/*
+		 * An NMI aimed at a higher plane forces entry into that
+		 * plane (reason INTERRUPT, below) but the NMI itself is
+		 * folded back to plane 0: the reference host never delivers
+		 * an NMI inside a higher VTL, it re-queues it to VTL0's
+		 * context for delivery after the VTL returns.
+		 */
+		if (vcpu->plane_level) {
+			struct kvm_vcpu *twin;
+			int p;
+
+			WRITE_ONCE(vcpu->arch.hv_apic_event_pending, true);
+			if (vcpu->common->vcpus[0])
+				kvm_inject_nmi(vcpu->common->vcpus[0]);
+			for (p = 0; p < vcpu->plane_level; p++) {
+				twin = vcpu->common->vcpus[p];
+				if (twin) {
+					kvm_make_request(KVM_REQ_UNBLOCK, twin);
+					kvm_vcpu_kick(twin);
+				}
+			}
+		} else {
+			kvm_inject_nmi(vcpu);
+			kvm_vcpu_kick(vcpu);
+		}
 		break;
 
 	case APIC_DM_INIT:
@@ -3592,6 +3616,17 @@ int kvm_hv_vapic_msr_write(struct kvm_vcpu *vcpu, u32 reg, u64 data)
 {
 	if (!lapic_in_kernel(vcpu))
 		return 1;
+
+	/*
+	 * Bits 63:32 are reserved in non-ICR registers, but the Windows
+	 * secure kernel leaves stale data in the high bits when writing
+	 * the Hyper-V vAPIC MSRs from a higher VTL.  The reference host
+	 * exempts those writes and truncates; a #GP here is a VTL1
+	 * bugcheck.  The exemption covers only this PV path: a native
+	 * x2APIC WRMSR takes the architectural #GP whatever the plane.
+	 */
+	if (vcpu->plane_level && reg != APIC_ICR)
+		data = (u32)data;
 
 	return kvm_lapic_msr_write(vcpu->arch.apic, reg, data);
 }

@@ -610,8 +610,9 @@ static void stimer_mark_pending(struct kvm_vcpu_hv_stimer *stimer,
 	 * A pending stimer on a suspended higher plane is only processed
 	 * once that plane runs; kick the lower twins so the running one
 	 * re-evaluates pending higher-plane events and forces entry.
+	 * This applies to retry paths too (vcpu_kick == false).
 	 */
-	if (vcpu_kick && vcpu->plane_level) {
+	if (vcpu->plane_level) {
 		struct kvm_vcpu *twin;
 		int p;
 

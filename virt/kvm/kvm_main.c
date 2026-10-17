@@ -5448,9 +5448,14 @@ void kvm_vcpu_set_plane_runnable(struct kvm_vcpu *vcpu)
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_set_plane_runnable);
 
+void __weak kvm_arch_vcpu_plane_stopped(struct kvm_vcpu *vcpu)
+{
+}
+
 void kvm_vcpu_set_plane_stopped(struct kvm_vcpu *vcpu)
 {
 	vcpu->plane_state = STOPPED;
+	kvm_arch_vcpu_plane_stopped(vcpu);
 	kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_set_plane_stopped);

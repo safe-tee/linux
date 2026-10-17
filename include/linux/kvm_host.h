@@ -502,6 +502,7 @@ static inline void kvm_vcpu_cancel_vtl_fpu_carry(struct kvm_vcpu_common *common)
 
 void kvm_vcpu_set_plane_runnable(struct kvm_vcpu *vcpu);
 void kvm_vcpu_set_plane_stopped(struct kvm_vcpu *vcpu);
+void kvm_arch_vcpu_plane_stopped(struct kvm_vcpu *vcpu);
 struct kvm_vcpu *kvm_vcpu_select_plane(struct kvm_vcpu *vcpu);
 
 static inline bool kvm_vcpu_wants_to_run(struct kvm_vcpu *vcpu)
