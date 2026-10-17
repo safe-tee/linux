@@ -6499,11 +6499,14 @@ void kvm_mmu_free_obsolete_roots(struct kvm_vcpu *vcpu)
 	int i;
 
 	/*
-	 * KVM_REQ_MMU_FREE_OBSOLETE_ROOTS is tracked in the request set
-	 * shared by all of the vCPU's planes, so the plane that consumes
-	 * the request is not necessarily the plane whose root is obsolete.
-	 * Service every plane: the inactive twins cannot be running (all
-	 * planes of a vCPU share one thread), so their MMUs are stable.
+	 * KVM_REQ_MMU_FREE_OBSOLETE_ROOTS fans out to every plane twin,
+	 * but each twin only consumes its own copy when it next runs, and
+	 * a plane that userspace never re-enters would pin its obsolete
+	 * roots indefinitely.  Service every plane from whichever twin
+	 * consumes its request first: the inactive twins cannot be
+	 * running (all planes of a vCPU share one thread), so their MMUs
+	 * are stable, and a twin's own later request finds nothing left
+	 * to free.
 	 */
 	for (i = 0; i < KVM_MAX_PLANES; i++) {
 		v = vcpu->common->vcpus[i];

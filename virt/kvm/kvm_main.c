@@ -227,8 +227,28 @@ static void kvm_make_vcpu_request(struct kvm_vcpu *vcpu, unsigned int req,
 {
 	int cpu;
 
-	if (likely(!(req & KVM_REQUEST_NO_ACTION)))
+	if (likely(!(req & KVM_REQUEST_NO_ACTION))) {
 		__kvm_make_request(req, vcpu);
+
+		/*
+		 * A per-plane request raised on "the vCPU" (TLB flush after
+		 * a host-side zap, obsolete-roots reload, ...) concerns
+		 * every plane: fan it out to the twins, or the plane that
+		 * runs next consumes a bit the others still need.  Mode,
+		 * pCPU and wait are shared with the common, so the kick
+		 * logic below covers the twins too.
+		 */
+		if (req & KVM_REQUEST_PER_PLANE) {
+			struct kvm_vcpu *twin;
+			int p;
+
+			for (p = 0; p < KVM_MAX_PLANES; p++) {
+				twin = vcpu->common->vcpus[p];
+				if (twin && twin != vcpu)
+					__kvm_make_request(req, twin);
+			}
+		}
+	}
 
 	if (!(req & KVM_REQUEST_NO_WAKEUP) && kvm_vcpu_wake_up(vcpu))
 		return;
