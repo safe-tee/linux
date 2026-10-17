@@ -4513,7 +4513,15 @@ static inline void sync_cr8_to_lapic(struct kvm_vcpu *vcpu)
 
 	if (!svm_is_intercept(svm, INTERCEPT_CR8_WRITE)) {
 		int cr8 = svm->vmcb->control.int_ctl & V_TPR_MASK;
-		kvm_set_cr8(vcpu, cr8);
+
+		/*
+		 * Hardware changes V_TPR only on a guest CR8 write.  Pushing
+		 * an unchanged value into the APIC would zero TPR[3:0] (CR8
+		 * maps TPR[7:4] alone), wiping the low nibble of a TASKPRI
+		 * value the guest set through the APIC page or MSR.
+		 */
+		if (cr8 != svm->v_tpr_entry)
+			kvm_set_cr8(vcpu, cr8);
 	}
 }
 
@@ -4528,6 +4536,7 @@ static inline void sync_lapic_to_cr8(struct kvm_vcpu *vcpu)
 	cr8 = kvm_get_cr8(vcpu);
 	svm->vmcb->control.int_ctl &= ~V_TPR_MASK;
 	svm->vmcb->control.int_ctl |= cr8 & V_TPR_MASK;
+	svm->v_tpr_entry = cr8 & V_TPR_MASK;
 }
 
 static void svm_complete_soft_interrupt(struct kvm_vcpu *vcpu, u8 vector,
