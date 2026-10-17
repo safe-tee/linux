@@ -3506,6 +3506,7 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 {
 	switch (ioctl) {
 	case KVM_ENABLE_CAP:
+	case KVM_SET_GUEST_DEBUG:
 	case KVM_GET_DEBUGREGS:
 	case KVM_SET_DEBUGREGS:
 	case KVM_GET_LAPIC:

@@ -1549,7 +1549,7 @@ for vm-wide capabilities.
 
 :Capability: KVM_CAP_MP_STATE
 :Architectures: x86, s390, arm64, riscv, loongarch
-:Type: vcpu ioctl
+:Type: vcpu ioctl (all planes)
 :Parameters: struct kvm_mp_state (out)
 :Returns: 0 on success; -1 on error
 
@@ -1632,7 +1632,7 @@ whether the vcpu is runnable.
 
 :Capability: KVM_CAP_MP_STATE
 :Architectures: x86, s390, arm64, riscv, loongarch
-:Type: vcpu ioctl
+:Type: vcpu ioctl (all planes)
 :Parameters: struct kvm_mp_state (in)
 :Returns: 0 on success; -1 on error
 
@@ -3779,7 +3779,7 @@ handled.
 
 :Capability: KVM_CAP_SET_GUEST_DEBUG
 :Architectures: x86, s390, ppc, arm64
-:Type: vcpu ioctl
+:Type: vcpu ioctl (all planes)
 :Parameters: struct kvm_guest_debug (in)
 :Returns: 0 on success; -1 on error
 
