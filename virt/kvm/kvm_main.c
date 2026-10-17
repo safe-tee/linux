@@ -3925,24 +3925,25 @@ int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_write_guest);
 
-/* Write a page KVM maintains for the guest; plane protections do not apply. */
-int kvm_write_guest_unprotected(struct kvm *kvm, gpa_t gpa, const void *data,
-				unsigned long len)
+/*
+ * Write a page KVM maintains for the guest on behalf of plane @plane,
+ * honouring that plane's memory attributes rather than plane 0's.
+ */
+int kvm_plane_write_guest(struct kvm_plane *plane, gpa_t gpa, const void *data,
+			  unsigned long len)
 {
+	struct kvm *kvm = plane->kvm;
 	gfn_t gfn = gpa >> PAGE_SHIFT;
 	int seg;
 	int offset = offset_in_page(gpa);
+	int ret;
 
 	while ((seg = next_segment(len, offset)) != 0) {
-		struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
-		unsigned long addr;
-
-		addr = gfn_to_hva_many(slot, gfn, NULL);
-		if (kvm_is_error_hva(addr))
-			return -EFAULT;
-		if (__copy_to_user((void __user *)addr + offset, data, seg))
-			return -EFAULT;
-		mark_page_dirty_in_slot(kvm, slot, gfn);
+		ret = __kvm_write_guest_page(plane, kvm,
+					     gfn_to_memslot(kvm, gfn), gfn,
+					     data, offset, seg);
+		if (ret < 0)
+			return ret;
 		offset = 0;
 		len -= seg;
 		data += seg;
@@ -3950,7 +3951,30 @@ int kvm_write_guest_unprotected(struct kvm *kvm, gpa_t gpa, const void *data,
 	}
 	return 0;
 }
-EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_write_guest_unprotected);
+
+/* Read counterpart of kvm_plane_write_guest(). */
+int kvm_plane_read_guest(struct kvm_plane *plane, gpa_t gpa, void *data,
+			 unsigned long len)
+{
+	struct kvm *kvm = plane->kvm;
+	gfn_t gfn = gpa >> PAGE_SHIFT;
+	int seg;
+	int offset = offset_in_page(gpa);
+	int ret;
+
+	while ((seg = next_segment(len, offset)) != 0) {
+		ret = __kvm_read_guest_page(plane, gfn_to_memslot(kvm, gfn),
+					    gfn, data, offset, seg,
+					    KVM_MEMORY_ATTRIBUTE_NR);
+		if (ret < 0)
+			return ret;
+		offset = 0;
+		len -= seg;
+		data += seg;
+		++gfn;
+	}
+	return 0;
+}
 
 int kvm_vcpu_write_guest(struct kvm_vcpu *vcpu, gpa_t gpa, const void *data,
 		         unsigned long len)

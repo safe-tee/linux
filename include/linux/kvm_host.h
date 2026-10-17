@@ -1567,8 +1567,10 @@ int kvm_write_guest_page(struct kvm *kvm, gfn_t gfn, const void *data,
 			 int offset, int len);
 int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
 		    unsigned long len);
-int kvm_write_guest_unprotected(struct kvm *kvm, gpa_t gpa, const void *data,
-				unsigned long len);
+int kvm_plane_write_guest(struct kvm_plane *plane, gpa_t gpa, const void *data,
+			  unsigned long len);
+int kvm_plane_read_guest(struct kvm_plane *plane, gpa_t gpa, void *data,
+			 unsigned long len);
 int kvm_write_guest_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
 			   void *data, unsigned long len);
 int kvm_write_guest_offset_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,

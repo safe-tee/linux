@@ -1254,12 +1254,20 @@ static bool hv_tsc_page_gfn(struct kvm_hv *hv, int plane, u64 *gfn)
 	if (!(msr & HV_X64_MSR_TSC_REFERENCE_ENABLE))
 		return false;
 
+	if (test_bit(plane, hv->hv_tsc_page_broken))
+		return false;
+
 	*gfn = msr >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
 	return true;
 }
 
-/* Publish the current parameters to one plane's page: struct first, then sequence. */
-static int hv_publish_tsc_page(struct kvm *kvm, unsigned int plane, u64 gfn)
+/*
+ * Publish the current parameters to one plane's page: struct first, then
+ * sequence.  The write is subject to the owning plane's own memory
+ * attributes; a plane whose page cannot be written loses only that page,
+ * and keeps whatever the page last held, until it writes its MSR again.
+ */
+static void hv_publish_tsc_page(struct kvm *kvm, unsigned int plane, u64 gfn)
 {
 	struct kvm_hv *hv = to_kvm_hv(kvm);
 	struct ms_hyperv_tsc_page page = hv->tsc_ref;
@@ -1275,38 +1283,55 @@ static int hv_publish_tsc_page(struct kvm *kvm, unsigned int plane, u64 gfn)
 	if (plane && hv->tsc_ref_from_guest)
 		tsc_seq = 0;
 
+	/*
+	 * The page may hold a live sequence from an earlier enable, over
+	 * parameters that have since changed.  Invalidate it with a discrete
+	 * write first: the stores of one long copy are not ordered as seen
+	 * by another vCPU, so folding the zero sequence into the body write
+	 * would let a reader pair the old sequence with a half-written body.
+	 */
 	page.tsc_sequence = 0;
-	if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &page, sizeof(page)))
-		return -EFAULT;
+	if (kvm_plane_write_guest(kvm->planes[plane], gfn_to_gpa(gfn), &page,
+				  sizeof(page.tsc_sequence)))
+		goto broken;
+
+	/* Ensure the sequence is zero before the body changes. */
+	smp_wmb();
+	if (kvm_plane_write_guest(kvm->planes[plane], gfn_to_gpa(gfn), &page,
+				  sizeof(page)))
+		goto broken;
 
 	if (!tsc_seq)
-		return 0;
+		return;
 
 	/* The struct is complete before the sequence makes it valid. */
 	smp_wmb();
 	page.tsc_sequence = tsc_seq;
-	if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &page,
-					sizeof(page.tsc_sequence)))
-		return -EFAULT;
-	return 0;
+	if (kvm_plane_write_guest(kvm->planes[plane], gfn_to_gpa(gfn), &page,
+				  sizeof(page.tsc_sequence)))
+		goto broken;
+	return;
+
+broken:
+	set_bit(plane, hv->hv_tsc_page_broken);
 }
 
 /* The lowest plane with an enabled page; it owns the sequence number. */
-static bool hv_first_tsc_page_gfn(struct kvm *kvm, u64 *gfn)
+static int hv_first_tsc_page(struct kvm *kvm, u64 *gfn)
 {
 	struct kvm_hv *hv = to_kvm_hv(kvm);
 	int i;
 
 	for (i = 0; i < KVM_MAX_PLANES; i++) {
 		if (hv_tsc_page_gfn(hv, i, gfn))
-			return true;
+			return i;
 	}
 
-	return false;
+	return -1;
 }
 
 /* Write the first @len bytes of the reference page to every enabled plane. */
-static int hv_write_tsc_pages(struct kvm *kvm, size_t len)
+static void hv_write_tsc_pages(struct kvm *kvm, size_t len)
 {
 	struct kvm_hv *hv = to_kvm_hv(kvm);
 	u64 gfn;
@@ -1316,11 +1341,54 @@ static int hv_write_tsc_pages(struct kvm *kvm, size_t len)
 		if (!hv_tsc_page_gfn(hv, i, &gfn))
 			continue;
 
-		if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, len))
-			return -EFAULT;
+		/*
+		 * A plane whose own attributes refuse the write loses only
+		 * its page; the other planes' pages stay maintained.
+		 */
+		if (kvm_plane_write_guest(kvm->planes[i], gfn_to_gpa(gfn),
+					  &hv->tsc_ref, len))
+			set_bit(i, hv->hv_tsc_page_broken);
 	}
+}
 
-	return 0;
+/* Invalidate one plane's page: its readers fall back to TIME_REF_COUNT. */
+static void hv_invalidate_tsc_page(struct kvm *kvm, unsigned int plane, u64 gfn)
+{
+	struct kvm_hv *hv = to_kvm_hv(kvm);
+	u32 tsc_seq = 0;
+
+	if (kvm_plane_write_guest(kvm->planes[plane], gfn_to_gpa(gfn),
+				  &tsc_seq, sizeof(tsc_seq)))
+		set_bit(plane, hv->hv_tsc_page_broken);
+}
+
+/*
+ * Under guest TSC emulation the parameters come from plane @src_plane's
+ * page, which is guest-writable: they must not reach a higher plane's page
+ * with hypervisor authority.  A higher plane's page either already holds
+ * the same contents (every page gets the same stream, so a page carried
+ * across migration matches) or was never published — enabled from the host
+ * side while the update was pending — and would serve whatever its memory
+ * last held.  Invalidate the pages that do not match.
+ */
+static void hv_invalidate_mismatched_tsc_pages(struct kvm *kvm, int src_plane)
+{
+	struct kvm_hv *hv = to_kvm_hv(kvm);
+	struct ms_hyperv_tsc_page page;
+	u64 gfn;
+	int i;
+
+	for (i = src_plane + 1; i < KVM_MAX_PLANES; i++) {
+		if (!hv_tsc_page_gfn(hv, i, &gfn))
+			continue;
+
+		if (!kvm_plane_read_guest(kvm->planes[i], gfn_to_gpa(gfn),
+					  &page, sizeof(page)) &&
+		    !memcmp(&page, &hv->tsc_ref, sizeof(page)))
+			continue;
+
+		hv_invalidate_tsc_page(kvm, i, gfn);
+	}
 }
 
 void kvm_hv_setup_tsc_page(struct kvm *kvm,
@@ -1328,6 +1396,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 {
 	struct kvm_hv *hv = to_kvm_hv(kvm);
 	u32 tsc_seq;
+	int plane;
 	u64 gfn;
 
 	BUILD_BUG_ON(sizeof(tsc_seq) != sizeof(hv->tsc_ref.tsc_sequence));
@@ -1335,28 +1404,46 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 
 	guard(mutex)(&hv->hv_lock);
 
-	if (hv->hv_tsc_page_status == HV_TSC_PAGE_BROKEN ||
-	    hv->hv_tsc_page_status == HV_TSC_PAGE_SET ||
+	if (hv->hv_tsc_page_status == HV_TSC_PAGE_SET ||
 	    hv->hv_tsc_page_status == HV_TSC_PAGE_UNSET)
 		return;
 
-	if (!hv_first_tsc_page_gfn(kvm, &gfn))
-		return;
+	if (tsc_page_update_unsafe(hv)) {
+		/*
+		 * The guest has opted for TSC emulation after migration: the
+		 * lowest enabled plane's page carries the parameters to keep.
+		 * The reads are subject to the owning plane's read attribute;
+		 * a plane whose page cannot be read loses that page and the
+		 * next enabled plane takes over.
+		 */
+		for (;;) {
+			plane = hv_first_tsc_page(kvm, &gfn);
+			if (plane < 0)
+				return;
 
-	/*
-	 * Because the TSC parameters only vary when there is a
-	 * change in the master clock, do not bother with caching.
-	 */
-	if (unlikely(kvm_read_guest(kvm, gfn_to_gpa(gfn),
-				    &tsc_seq, sizeof(tsc_seq))))
-		goto out_err;
+			if (likely(!kvm_plane_read_guest(kvm->planes[plane],
+							 gfn_to_gpa(gfn), &tsc_seq,
+							 sizeof(tsc_seq))))
+				break;
 
-	if (tsc_seq && tsc_page_update_unsafe(hv)) {
-		if (kvm_read_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, sizeof(hv->tsc_ref)))
-			goto out_err;
+			set_bit(plane, hv->hv_tsc_page_broken);
+		}
 
-		hv->tsc_ref_from_guest = true;
-		hv->hv_tsc_page_status = HV_TSC_PAGE_SET;
+		if (tsc_seq) {
+			if (kvm_plane_read_guest(kvm->planes[plane],
+						 gfn_to_gpa(gfn), &hv->tsc_ref,
+						 sizeof(hv->tsc_ref))) {
+				/* Status is unchanged: the next update retries. */
+				set_bit(plane, hv->hv_tsc_page_broken);
+				return;
+			}
+
+			hv->tsc_ref_from_guest = true;
+			hv->hv_tsc_page_status = HV_TSC_PAGE_SET;
+			hv_invalidate_mismatched_tsc_pages(kvm, plane);
+			return;
+		}
+	} else if (hv_first_tsc_page(kvm, &gfn) < 0) {
 		return;
 	}
 
@@ -1365,37 +1452,43 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	 * guest to use the time reference count MSR.
 	 */
 	hv->tsc_ref.tsc_sequence = 0;
-	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence)))
-		goto out_err;
+	hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence));
 
+	/*
+	 * If the master clock is not currently TSC-based, the pages cannot
+	 * describe it: leave them invalid, with their readers on the
+	 * TIME_REF_COUNT fallback, and retry on the next clock update.
+	 * Republishing the previous parameters would advertise a clock that
+	 * no longer matches the one TIME_REF_COUNT answers from.
+	 */
 	if (!compute_tsc_page_parameters(hv_clock, &hv->tsc_ref))
-		goto out_err;
+		return;
 
 	/* Ensure sequence is zero before writing the rest of the struct.  */
 	smp_wmb();
-	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref)))
-		goto out_err;
+	hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref));
 
 	/*
 	 * Now switch to the TSC page mechanism by writing the sequence.
+	 * The sequence is host-authored and monotonic, never read back from
+	 * the pages themselves: they are guest-writable, and a lower plane
+	 * which could steer the next value could stage it on a higher
+	 * plane's page in advance, and have that plane's seqlock accept a
+	 * torn read across this rewrite.
 	 */
-	tsc_seq++;
+	tsc_seq = hv->hv_tsc_sequence + 1;
 	if (tsc_seq == 0xFFFFFFFF || tsc_seq == 0)
 		tsc_seq = 1;
+	hv->hv_tsc_sequence = tsc_seq;
 
 	/* Write the struct entirely before the non-zero sequence.  */
 	smp_wmb();
 
 	hv->tsc_ref.tsc_sequence = tsc_seq;
-	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence)))
-		goto out_err;
+	hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence));
 
 	hv->tsc_ref_from_guest = false;
 	hv->hv_tsc_page_status = HV_TSC_PAGE_SET;
-	return;
-
-out_err:
-	hv->hv_tsc_page_status = HV_TSC_PAGE_BROKEN;
 }
 
 void kvm_hv_request_tsc_page_update(struct kvm *kvm)
@@ -1598,20 +1691,43 @@ static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
 	case HV_X64_MSR_REFERENCE_TSC: {
 		u64 gfn;
 
-		/* The parameters are valid already: publish them to this page only. */
+		/* A newly written MSR is a fresh attempt at the page. */
+		clear_bit(vcpu->plane_level, hv->hv_tsc_page_broken);
+
+		hv->hv_tsc_page_plane[vcpu->plane_level] = data;
+
+		/*
+		 * The parameters are valid already: publish them to this page
+		 * only.  Not under guest TSC emulation: those parameters are
+		 * the frozen migration-time snapshot, and a guest MSR write
+		 * is the trigger for computing fresh ones (GUEST_CHANGED
+		 * below), as it was before the pages were tracked per plane.
+		 */
 		if (!host && hv->hv_tsc_page_status == HV_TSC_PAGE_SET &&
+		    !hv->tsc_ref_from_guest &&
 		    (data & HV_X64_MSR_TSC_REFERENCE_ENABLE)) {
 			/* The caller holds hv_lock. */
-			hv->hv_tsc_page_plane[vcpu->plane_level] = data;
 			gfn = data >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
-			if (hv_publish_tsc_page(kvm, vcpu->plane_level, gfn))
-				hv->hv_tsc_page_status = HV_TSC_PAGE_BROKEN;
+			hv_publish_tsc_page(kvm, vcpu->plane_level, gfn);
 			break;
 		}
 
-		hv->hv_tsc_page_plane[vcpu->plane_level] = data;
+		/*
+		 * The publish below is deferred to a plane-0 vCPU processing
+		 * the masterclock update; until then the page holds whatever
+		 * its memory last held — possibly a forged clock a lower
+		 * plane staged there.  Invalidate it now, so this plane reads
+		 * TIME_REF_COUNT until the real parameters arrive.  Not for
+		 * host writes: a page restored across migration keeps its
+		 * contents for the TSC-emulation readback.
+		 */
+		if (!host && (data & HV_X64_MSR_TSC_REFERENCE_ENABLE)) {
+			gfn = data >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
+			hv_invalidate_tsc_page(kvm, vcpu->plane_level, gfn);
+		}
+
 		/* Another plane's page may still be enabled: keep it updated. */
-		if (hv_first_tsc_page_gfn(kvm, &gfn)) {
+		if (hv_first_tsc_page(kvm, &gfn) >= 0) {
 			if (!host)
 				hv->hv_tsc_page_status = HV_TSC_PAGE_GUEST_CHANGED;
 			else

@@ -1086,8 +1086,6 @@ enum hv_tsc_page_status {
 	HV_TSC_PAGE_HOST_CHANGED,
 	/* TSC page was properly set up and is currently active  */
 	HV_TSC_PAGE_SET,
-	/* TSC page was set up with an inaccessible GPA */
-	HV_TSC_PAGE_BROKEN,
 };
 
 #ifdef CONFIG_KVM_HYPERV
@@ -1113,6 +1111,18 @@ struct kvm_hv {
 	 * it exposes is not: every enabled page gets the same contents.
 	 */
 	u64 hv_tsc_page_plane[KVM_MAX_PLANES];
+	/*
+	 * Planes whose reference TSC page could not be written, typically
+	 * because the plane's own memory attributes forbid the write.  Such
+	 * a page is left alone until the plane writes its MSR again.
+	 */
+	DECLARE_BITMAP(hv_tsc_page_broken, KVM_MAX_PLANES);
+	/*
+	 * The last sequence number published to the planes' pages.  Host-
+	 * authored and monotonic; never seeded from the (guest-writable)
+	 * pages themselves.
+	 */
+	u32 hv_tsc_sequence;
 	enum hv_tsc_page_status hv_tsc_page_status;
 
 	/* Hyper-v based guest crash (NT kernel bugcheck) parameters */
