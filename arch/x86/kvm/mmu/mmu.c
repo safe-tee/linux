@@ -2106,7 +2106,7 @@ static bool kvm_sync_page_check(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp)
 	 *  - quadrant: not part of the overall MMU role (similar to level)
 	 */
 	const union kvm_mmu_page_role sync_role_ign = {
-		.level = 0xf,
+		.level = 0x7,
 		.access = ACC_ALL,
 		.quadrant = 0x3,
 		.passthrough = 0x1,
@@ -3244,7 +3244,9 @@ static bool kvm_mmu_prefetch_sptes(struct kvm_vcpu *vcpu, gfn_t gfn, u64 *sptep,
 		return false;
 
 	for (i = 0; i < nr_pages; i++, gfn++, sptep++) {
-		if (kvm_get_vm_memory_attributes(vcpu->kvm, gfn)) {
+		if (kvm_get_vm_memory_attributes(vcpu->kvm, gfn) ||
+		    (vcpu->plane_level &&
+		     kvm_plane_get_memory_attributes(vcpu->plane, gfn))) {
 			kvm_release_page_clean(pages[i]);
 			continue;
 		}
@@ -4709,7 +4711,7 @@ static inline unsigned kvm_get_gfn_protections(struct kvm_vcpu *vcpu, gfn_t gfn)
 {
 	struct kvm *kvm = vcpu->kvm;
 	unsigned int access = ACC_ALL | ACC_READ_MASK;
-	unsigned long attrs = kvm_get_vm_memory_attributes(kvm, gfn);
+	unsigned long attrs = kvm_plane_get_memory_attributes(vcpu->plane, gfn);
 	if (!attrs)
 		return access;
 
@@ -4733,6 +4735,19 @@ static int kvm_faultin_memory_protections(struct kvm_vcpu *vcpu,
 	/* Memory attributes don't apply to MMIO regions */
 	if (unlikely(!fault->slot))
 		return RET_PF_CONTINUE;
+
+	/*
+	 * Hugepage mixed-attribute tracking only covers plane 0; clamp
+	 * non-zero-plane faults to 4KiB when the plane carries any attribute
+	 * in the largest possible mapping range.
+	 */
+	if (vcpu->plane_level && fault->max_level > PG_LEVEL_4K) {
+		gfn_t base = gfn_round_for_level(fault->gfn, fault->max_level);
+
+		if (kvm_plane_range_has_any_attrs(vcpu->plane, base,
+				base + KVM_PAGES_PER_HPAGE(fault->max_level)))
+			fault->max_level = PG_LEVEL_4K;
+	}
 
 	access = kvm_get_gfn_protections(vcpu, fault->gfn);
 	if (access == (ACC_ALL | ACC_READ_MASK))
@@ -6042,6 +6057,8 @@ static union kvm_cpu_role kvm_calc_cpu_role(struct kvm_vcpu *vcpu,
 	role.base.guest_mode = is_guest_mode(vcpu);
 	role.ext.valid = 1;
 
+	role.base.plane = vcpu->plane_level;
+
 	if (!____is_cr0_pg(regs)) {
 		role.base.direct = 1;
 		return role;
@@ -6134,6 +6151,7 @@ kvm_calc_tdp_mmu_root_page_role(struct kvm_vcpu *vcpu,
 	role.level = kvm_mmu_get_tdp_level(vcpu);
 	role.direct = true;
 	role.has_4_byte_gpte = false;
+	role.plane = vcpu->plane_level;
 
 	/* All TDP pages are supervisor-executable */
 	role.access = ACC_ALL;
@@ -6272,6 +6290,7 @@ kvm_calc_shadow_ept_root_page_role(struct kvm_vcpu *vcpu, bool accessed_dirty,
 	role.base.ad_disabled = !accessed_dirty;
 	role.base.guest_mode = true;
 	role.base.access = ACC_ALL;
+	role.base.plane = vcpu->plane_level;
 
 	role.ext.word = 0;
 	role.ext.execonly = execonly;
@@ -8353,12 +8372,36 @@ static bool hugepage_has_attrs(struct kvm *kvm, struct kvm_memory_slot *slot,
 	return true;
 }
 
+/*
+ * There are special considerations when applying a memory protection
+ * attribute against a page containing guest PTEs, because virtual
+ * addresses that require traversing that page need to fault.
+ *
+ * When using shadow paging, the PTEs that the CPU actually walks
+ * do not have any information about attributes (unlike TDP where
+ * the attributes become part of the TDP permission bits).  Since
+ * this should be a rare occasion, just invalidate all the mmu roots
+ * if shadow paging is in use and attributes do cover a guest PTE.
+ */
+static bool kvm_mmu_zap_if_gpte_page(struct kvm *kvm,
+				     struct kvm_gfn_range *range)
+{
+	struct kvm_mmu_page *sp;
+
+	for (gfn_t gfn = range->start; gfn < range->end; gfn++) {
+		for_each_gfn_valid_sp_with_gptes(kvm, sp, gfn) {
+			__kvm_mmu_zap_all_fast_front_half(kvm);
+			return false;
+		}
+	}
+	return false;
+}
+
 bool kvm_arch_post_set_vm_memory_attributes(struct kvm *kvm,
-					    struct kvm_gfn_range *range)
+					 struct kvm_gfn_range *range)
 {
 	unsigned long attrs = range->arg.attributes;
 	struct kvm_memory_slot *slot = range->slot;
-	struct kvm_mmu_page *sp;
 	int level;
 
 	lockdep_assert_held_write(&kvm->mmu_lock);
@@ -8415,24 +8458,21 @@ bool kvm_arch_post_set_vm_memory_attributes(struct kvm *kvm,
 		}
 	}
 
+	return kvm_mmu_zap_if_gpte_page(kvm, range);
+}
+
+bool kvm_arch_post_set_plane_memory_attributes(struct kvm *kvm,
+					       struct kvm_gfn_range *range)
+{
+	lockdep_assert_held_write(&kvm->mmu_lock);
+	lockdep_assert_held(&kvm->slots_lock);
+
 	/*
-	 * There are special considerations when applying an memory protection
-	 * attibute against a page containing guest PTEs, because virtual
-	 * addresses that requires traversing that page need to fault.
-	 *
-	 * When using shadow paging, the PTEs that the CPU actually walks
-	 * do not have any information about attributes (unlike TDP where
-	 * the attributes become part of the TDP permission bits).  Since
-	 * this should be a rare occasion, just invalidate all the mmu roots
-	 * if shadow paging is in use and attributes do cover a guest PTE.
+	 * Non-zero planes get no hugepage mixed-attribute tracking (their
+	 * faults are clamped to 4KiB while attributes are present); only
+	 * the shadow-paging gPTE invalidation applies.
 	 */
-	for (gfn_t gfn = range->start; gfn < range->end; gfn++) {
-		for_each_gfn_valid_sp_with_gptes(kvm, sp, gfn) {
-			__kvm_mmu_zap_all_fast_front_half(kvm);
-			return false;
-		}
-	}
-	return false;
+	return kvm_mmu_zap_if_gpte_page(kvm, range);
 }
 
 void kvm_arch_post_set_memory_attributes_unlocked(struct kvm *kvm)

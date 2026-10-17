@@ -331,7 +331,7 @@ extern struct kvm_host_values kvm_host;
  *     execonly and ad_disabled are only used for nested EPT which has
  *     has_4_byte_gpte=0.  Therefore, 2 bits are always unused.
  *
- *   - the 4 bits of level are effectively limited to the values 2/3/4/5,
+ *   - the 3 bits of level are effectively limited to the values 2/3/4/5,
  *     as 4k SPs are not tracked (allowed to go unsync).  In addition non-PAE
  *     paging has exactly one upper level, making level completely redundant
  *     when has_4_byte_gpte=1.
@@ -345,7 +345,7 @@ extern struct kvm_host_values kvm_host;
 union kvm_mmu_page_role {
 	u32 word;
 	struct {
-		unsigned level:4;
+		unsigned level:3;
 		unsigned has_4_byte_gpte:1;
 		unsigned quadrant:2;
 		unsigned direct:1;
@@ -368,7 +368,7 @@ union kvm_mmu_page_role {
 		 */
 		unsigned cr4_smep:1;
 
-		unsigned:3;
+		unsigned plane:4;
 
 		/*
 		 * This is left at the top of the word so that
@@ -379,6 +379,8 @@ union kvm_mmu_page_role {
 		unsigned smm:8;
 	};
 };
+
+static_assert(sizeof(union kvm_mmu_page_role) == sizeof(u32));
 
 /*
  * kvm_mmu_extended_role complements kvm_mmu_page_role, tracking properties

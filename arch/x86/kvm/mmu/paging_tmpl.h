@@ -415,13 +415,13 @@ retry_walk:
 		if (unlikely(kvm_is_error_hva(host_addr)))
 			goto error;
 
-		if (!kvm_mem_attributes_may_read_gfn(vcpu->kvm, gpa_to_gfn(real_gpa))) {
+		if (!kvm_vcpu_mem_attributes_may_read_gfn(vcpu, gpa_to_gfn(real_gpa))) {
 			walker->memory_attributes_fault = true;
 			walker->gfn = gpa_to_gfn(real_gpa);
 			goto error;
 		}
 
-		if (!kvm_mem_attributes_may_write_gfn(vcpu->kvm, gpa_to_gfn(real_gpa)))
+		if (!kvm_vcpu_mem_attributes_may_write_gfn(vcpu, gpa_to_gfn(real_gpa)))
 			walker->pte_writable[walker->level - 1] = false;
 
 		ptep_user = (pt_element_t __user *)((void *)host_addr + offset);

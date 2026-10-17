@@ -874,6 +874,16 @@ struct kvm_plane {
 	/* Per-Plane VCPU array */
 	struct xarray vcpu_array;
 
+#ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
+	/*
+	 * Per-plane memory attributes, used only for non-zero planes.
+	 * Plane 0's attributes live in kvm->mem_attrs, which also carries
+	 * partition-wide attributes such as KVM_MEMORY_ATTRIBUTE_PRIVATE.
+	 * Protected by slots_lock (for writes) and RCU (for reads).
+	 */
+	struct xarray mem_attrs;
+#endif
+
 	struct kvm_arch_plane arch;
 };
 
@@ -2792,6 +2802,17 @@ bool kvm_arch_post_set_vm_memory_attributes(struct kvm *kvm,
 u64 kvm_supported_vm_mem_attributes(struct kvm *kvm);
 bool kvm_range_has_any_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 				       unsigned long mask);
+static inline struct xarray *kvm_plane_mem_attr_array(struct kvm_plane *plane)
+{
+	return plane->level ? &plane->mem_attrs :
+			      &plane->kvm->mem_attrs.array;
+}
+
+static inline unsigned long kvm_plane_get_memory_attributes(struct kvm_plane *plane,
+							    gfn_t gfn)
+{
+	return xa_to_value(xa_load(kvm_plane_mem_attr_array(plane), gfn));
+}
 
 static inline u64 kvm_mem_attributes_generation(struct kvm *kvm)
 {
@@ -2807,9 +2828,24 @@ static inline u64 kvm_mem_attributes_generation(struct kvm *kvm)
 	return smp_load_acquire(&kvm->mem_attrs.generation);
 }
 
+bool kvm_plane_range_has_any_attrs(struct kvm_plane *plane, gfn_t start,
+				   gfn_t end);
+/*
+ * As kvm_arch_post_set_memory_attributes(), but for an update of a
+ * non-zero plane's attributes, which has no hugepage mixed-attribute
+ * tracking to maintain.
+ */
+bool kvm_arch_post_set_plane_memory_attributes(struct kvm *kvm,
+					       struct kvm_gfn_range *range);
 void kvm_arch_post_set_memory_attributes_unlocked(struct kvm *kvm);
 #else
 static inline unsigned long kvm_get_vm_memory_attributes(struct kvm *kvm, gfn_t gfn)
+{
+	return 0;
+}
+
+static inline unsigned long kvm_plane_get_memory_attributes(struct kvm_plane *plane,
+							   gfn_t gfn)
 {
 	return 0;
 }
@@ -2868,6 +2904,27 @@ static inline int kvm_mem_attributes_may_read_gfn(struct kvm *kvm, gfn_t gfn)
 static inline int kvm_mem_attributes_may_write_gfn(struct kvm *kvm, gfn_t gfn)
 {
 	unsigned long attrs = kvm_get_vm_memory_attributes(kvm, gfn);
+
+	return kvm_mem_attributes_may_write(attrs);
+}
+
+/*
+ * vCPU-context accesses are checked against the vCPU's own plane's
+ * memory attributes: a higher plane is not subject to the protections
+ * it imposes on a lower plane's view of a page.
+ */
+static inline int kvm_vcpu_mem_attributes_may_read_gfn(struct kvm_vcpu *vcpu,
+							gfn_t gfn)
+{
+	unsigned long attrs = kvm_plane_get_memory_attributes(vcpu->plane, gfn);
+
+	return kvm_mem_attributes_may_read(attrs);
+}
+
+static inline int kvm_vcpu_mem_attributes_may_write_gfn(struct kvm_vcpu *vcpu,
+							 gfn_t gfn)
+{
+	unsigned long attrs = kvm_plane_get_memory_attributes(vcpu->plane, gfn);
 
 	return kvm_mem_attributes_may_write(attrs);
 }

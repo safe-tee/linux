@@ -1244,6 +1244,9 @@ static struct kvm_plane *kvm_create_plane(struct kvm *kvm, unsigned plane_level)
 	plane->level = plane_level;
 
 	xa_init(&plane->vcpu_array);
+#ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
+	xa_init(&plane->mem_attrs);
+#endif
 
 	if (kvm_arch_plane_init(kvm, plane, plane_level))
 		goto out_free_plane;
@@ -1260,6 +1263,9 @@ out_free_plane:
 
 static void kvm_destroy_one_plane(struct kvm_plane *plane)
 {
+#ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
+	xa_destroy(&plane->mem_attrs);
+#endif
 	kvm_arch_plane_destroy(plane);
 	kvm_free_plane(plane);
 }
@@ -2715,6 +2721,28 @@ bool kvm_range_has_vm_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 	return true;
 }
 
+/* Returns true if _any_ gfn in [@start, @end) has any attribute in @plane. */
+bool kvm_plane_range_has_any_attrs(struct kvm_plane *plane, gfn_t start,
+				   gfn_t end)
+{
+	XA_STATE(xas, kvm_plane_mem_attr_array(plane), start);
+	void *entry;
+
+	guard(rcu)();
+	xas_for_each(&xas, entry, end - 1) {
+		if (xas_retry(&xas, entry))
+			continue;
+		/*
+		 * Only count real attribute values: xa_reserve()
+		 * placeholders from an in-flight (or failed) attribute
+		 * update are not attributes.
+		 */
+		if (xa_is_value(entry))
+			return true;
+	}
+	return false;
+}
+
 /*
  * Returns true if _any_ gfns in the range [@start, @end) have attributes that
  * match _any_ bit in @mask.
@@ -2748,7 +2776,28 @@ bool kvm_range_has_any_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end
 	return false;
 }
 
-static bool kvm_range_memory_attributes_need_sync(struct kvm *kvm,
+/*
+ * Returns true if _any_ gfn in [@start, @end) has attributes matching
+ * _any_ bit in @mask in @plane's attribute array.
+ */
+static bool kvm_plane_range_has_memory_attributes(struct kvm_plane *plane,
+						  gfn_t start, gfn_t end,
+						  unsigned long mask)
+{
+	XA_STATE(xas, kvm_plane_mem_attr_array(plane), start);
+	void *entry;
+
+	guard(rcu)();
+	xas_for_each(&xas, entry, end - 1) {
+		if (xas_retry(&xas, entry))
+			continue;
+		if (xa_is_value(entry) && (xa_to_value(entry) & mask))
+			return true;
+	}
+	return false;
+}
+
+static bool kvm_range_memory_attributes_need_sync(struct kvm_plane *plane,
 						  gfn_t start, gfn_t end,
 						  unsigned long attributes)
 {
@@ -2757,7 +2806,7 @@ static bool kvm_range_memory_attributes_need_sync(struct kvm *kvm,
 	if (attributes & mask)
 		return true;
 
-	return kvm_range_has_any_memory_attributes(kvm, start, end, mask);
+	return kvm_plane_range_has_memory_attributes(plane, start, end, mask);
 }
 
 static __always_inline bool kvm_handle_gfn_range(struct kvm *kvm,
@@ -2832,9 +2881,11 @@ static bool kvm_pre_set_vm_memory_attributes(struct kvm *kvm,
 }
 
 /* Set @attributes for the gfn range [@start, @end). */
-static int kvm_set_vm_mem_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
-				     unsigned long attributes)
+static int kvm_plane_set_mem_attributes(struct kvm_plane *plane, gfn_t start,
+					gfn_t end, unsigned long attributes)
 {
+	struct kvm *kvm = plane->kvm;
+	struct xarray *attr_array = kvm_plane_mem_attr_array(plane);
 	struct kvm_mmu_notifier_range pre_set_range = {
 		.start = start,
 		.end = end,
@@ -2860,13 +2911,17 @@ static int kvm_set_vm_mem_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 
 	entry = attributes ? xa_mk_value(attributes) : NULL;
 
+	if (plane->level)
+		post_set_range.handler = kvm_arch_post_set_plane_memory_attributes;
+
 	mutex_lock(&kvm->slots_lock);
 
 	/* Nothing to do if the entire range has the desired attributes. */
-	if (kvm_range_has_vm_memory_attributes(kvm, start, end, ~0, attributes))
+	if (!plane->level &&
+	    kvm_range_has_vm_memory_attributes(kvm, start, end, ~0, attributes))
 		goto out_unlock;
 
-	sync = kvm_range_memory_attributes_need_sync(kvm, start, end,
+	sync = kvm_range_memory_attributes_need_sync(plane, start, end,
 						     attributes);
 
 	trace_kvm_set_vm_mem_attributes(start, end, attributes, sync,
@@ -2878,9 +2933,19 @@ static int kvm_set_vm_mem_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 	 * allocates, so no reservations are needed when clearing.
 	 */
 	for (i = start; entry && i < end; i++) {
-		r = xa_reserve(&kvm->mem_attrs.array, i, GFP_KERNEL_ACCOUNT);
-		if (r)
+		r = xa_reserve(attr_array, i, GFP_KERNEL_ACCOUNT);
+		if (r) {
+			/*
+			 * Nothing was stored yet; drop the reservations
+			 * already made so they don't sit in the array
+			 * (and pin their nodes) for the VM's lifetime.
+			 * xa_release() only removes reserved entries, so
+			 * pre-existing attribute values are untouched.
+			 */
+			while (i-- > start)
+				xa_release(attr_array, i);
 			goto out_unlock;
+		}
 
 		cond_resched();
 	}
@@ -2888,8 +2953,7 @@ static int kvm_set_vm_mem_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 	found_memslot = kvm_handle_gfn_range(kvm, &pre_set_range);
 
 	for (i = start; i < end; i++) {
-		r = xa_err(xa_store(&kvm->mem_attrs.array, i, entry,
-				    GFP_KERNEL_ACCOUNT));
+		r = xa_err(xa_store(attr_array, i, entry, GFP_KERNEL_ACCOUNT));
 		KVM_BUG_ON(r, kvm);
 		cond_resched();
 	}
@@ -2899,6 +2963,15 @@ static int kvm_set_vm_mem_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 			  kvm->mem_attrs.generation + 1);
 
 	if (found_memslot) {
+		/*
+		 * The post-set handler differs by plane: hugepage
+		 * mixed-attribute tracking only follows plane 0's
+		 * attributes (faults on other planes with attributes
+		 * present are clamped to 4KiB mappings instead), but the
+		 * shadow-paging invalidation of mappings through
+		 * attribute-covered guest page tables is needed on every
+		 * plane.
+		 */
 		kvm_handle_gfn_range(kvm, &post_set_range);
 		KVM_MMU_LOCK(kvm);
 		kvm_mmu_invalidate_end(kvm);
@@ -2920,6 +2993,16 @@ bool __weak kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned lon
 	return false;
 }
 
+/*
+ * Only reachable on architectures which support planes; those provide a
+ * real implementation.
+ */
+bool __weak kvm_arch_post_set_plane_memory_attributes(struct kvm *kvm,
+						      struct kvm_gfn_range *range)
+{
+	return false;
+}
+
 bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs)
 {
 	if (attrs & ~kvm_supported_vm_mem_attributes(kvm))
@@ -2932,15 +3015,20 @@ bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs)
 	return true;
 }
 
-static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
+static int kvm_vm_ioctl_set_mem_attributes(struct kvm_plane *plane,
 					   struct kvm_memory_attributes *attrs)
 {
+	struct kvm *kvm = plane->kvm;
 	gfn_t start, end;
 
 	/* flags is currently not used. */
 	if (attrs->flags)
 		return -EINVAL;
 	if (!kvm_mem_attributes_valid(kvm, attrs->attributes))
+		return -EINVAL;
+	/* Partition-wide attributes have no meaning on a non-zero plane. */
+	if (plane->level &&
+	    (attrs->attributes & ~(unsigned long)KVM_MEMORY_ATTRIBUTE_PROT))
 		return -EINVAL;
 	if (attrs->size == 0 || attrs->address + attrs->size < attrs->address)
 		return -EINVAL;
@@ -2957,7 +3045,8 @@ static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
 	 */
 	BUILD_BUG_ON(sizeof(attrs->attributes) != sizeof(unsigned long));
 
-	return kvm_set_vm_mem_attributes(kvm, start, end, attrs->attributes);
+	return kvm_plane_set_mem_attributes(plane, start, end,
+					    attrs->attributes);
 }
 #endif /* CONFIG_KVM_VM_MEMORY_ATTRIBUTES */
 
@@ -3114,17 +3203,16 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(gfn_to_hva);
 
 unsigned long kvm_vcpu_gfn_to_hva(struct kvm_vcpu *vcpu, gfn_t gfn)
 {
-	struct kvm *kvm = vcpu->kvm;
 	unsigned long addr;
 
 	addr = gfn_to_hva_many(kvm_vcpu_gfn_to_memslot(vcpu, gfn), gfn, NULL);
 	if (kvm_is_error_hva(addr))
 		return addr;
 
-	if (!kvm_mem_attributes_may_read_gfn(kvm, gfn))
+	if (!kvm_vcpu_mem_attributes_may_read_gfn(vcpu, gfn))
 		return KVM_HVA_ERR_BAD;
 
-	if (!kvm_mem_attributes_may_write_gfn(kvm, gfn))
+	if (!kvm_vcpu_mem_attributes_may_write_gfn(vcpu, gfn))
 		return KVM_HVA_ERR_RO_BAD;
 
 	return addr;
@@ -3177,10 +3265,10 @@ unsigned long kvm_vcpu_gfn_to_hva_prot(struct kvm_vcpu *vcpu, gfn_t gfn, bool *w
 	if (kvm_is_error_hva(addr))
 		return addr;
 
-	if (!kvm_mem_attributes_may_read_gfn(vcpu->kvm, gfn))
+	if (!kvm_vcpu_mem_attributes_may_read_gfn(vcpu, gfn))
 		return KVM_HVA_ERR_BAD;
 
-	if (writable && !kvm_mem_attributes_may_write_gfn(vcpu->kvm, gfn))
+	if (writable && !kvm_vcpu_mem_attributes_may_write_gfn(vcpu, gfn))
 		*writable = false;
 
 	return addr;
@@ -3524,9 +3612,9 @@ int __kvm_vcpu_map(struct kvm_vcpu *vcpu, gfn_t gfn, struct kvm_host_map *map,
 	if (WARN_ON_ONCE(map->hva))
 		kvm_vcpu_unmap(vcpu, map);
 
-	if (!kvm_mem_attributes_may_read_gfn(vcpu->kvm, gfn))
+	if (!kvm_vcpu_mem_attributes_may_read_gfn(vcpu, gfn))
 		return -EFAULT;
-	if (writable && !kvm_mem_attributes_may_write_gfn(vcpu->kvm, gfn))
+	if (writable && !kvm_vcpu_mem_attributes_may_write_gfn(vcpu, gfn))
 		return -EFAULT;
 
 	map->pinned_page = NULL;
@@ -3589,7 +3677,8 @@ static int next_segment(unsigned long len, int offset)
 }
 
 /* Copy @len bytes from guest memory at '(@gfn * PAGE_SIZE) + @offset' to @data */
-static int __kvm_read_guest_page(struct kvm *kvm, struct kvm_memory_slot *slot,
+static int __kvm_read_guest_page(struct kvm_plane *plane,
+				 struct kvm_memory_slot *slot,
 				 gfn_t gfn, void *data, int offset, int len,
 				 unsigned long attr)
 {
@@ -3604,7 +3693,7 @@ static int __kvm_read_guest_page(struct kvm *kvm, struct kvm_memory_slot *slot,
 	if (kvm_is_error_hva(addr))
 		return -EFAULT;
 
-	attrs = kvm_get_vm_memory_attributes(kvm, gfn);
+	attrs = kvm_plane_get_memory_attributes(plane, gfn);
 	if (attrs & attr)
 		return -EFAULT;
 
@@ -3619,8 +3708,8 @@ int kvm_read_guest_page(struct kvm *kvm, gfn_t gfn, void *data, int offset,
 {
 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
 
-	return __kvm_read_guest_page(kvm, slot, gfn, data, offset, len,
-				     KVM_MEMORY_ATTRIBUTE_NR);
+	return __kvm_read_guest_page(kvm->planes[0], slot, gfn, data, offset,
+				     len, KVM_MEMORY_ATTRIBUTE_NR);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_read_guest_page);
 
@@ -3629,8 +3718,8 @@ int kvm_vcpu_read_guest_page(struct kvm_vcpu *vcpu, gfn_t gfn, void *data,
 {
 	struct kvm_memory_slot *slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
 
-	return __kvm_read_guest_page(vcpu->kvm, slot, gfn, data, offset, len,
-				     KVM_MEMORY_ATTRIBUTE_NR);
+	return __kvm_read_guest_page(vcpu->plane, slot, gfn, data, offset,
+				     len, KVM_MEMORY_ATTRIBUTE_NR);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_read_guest_page);
 
@@ -3639,8 +3728,8 @@ int kvm_vcpu_fetch_guest_page(struct kvm_vcpu *vcpu, gfn_t gfn, void *data,
 {
 	struct kvm_memory_slot *slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
 
-	return __kvm_read_guest_page(vcpu->kvm, slot, gfn, data, offset, len,
-				     KVM_MEMORY_ATTRIBUTE_NX);
+	return __kvm_read_guest_page(vcpu->plane, slot, gfn, data, offset,
+				     len, KVM_MEMORY_ATTRIBUTE_NX);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_fetch_guest_page);
 
@@ -3684,7 +3773,7 @@ int kvm_vcpu_read_guest(struct kvm_vcpu *vcpu, gpa_t gpa, void *data, unsigned l
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_read_guest);
 
-static int __kvm_read_guest_atomic(struct kvm *kvm,
+static int __kvm_read_guest_atomic(struct kvm_plane *plane,
 				   struct kvm_memory_slot *slot, gfn_t gfn,
 				   void *data, int offset, unsigned long len)
 {
@@ -3694,7 +3783,7 @@ static int __kvm_read_guest_atomic(struct kvm *kvm,
 	if (WARN_ON_ONCE(offset + len > PAGE_SIZE))
 		return -EFAULT;
 
-	if (!kvm_mem_attributes_may_read_gfn(kvm, gfn))
+	if (!kvm_mem_attributes_may_read(kvm_plane_get_memory_attributes(plane, gfn)))
 		return -EFAULT;
 
 	addr = gfn_to_hva_memslot_prot(slot, gfn, NULL);
@@ -3715,12 +3804,12 @@ int kvm_vcpu_read_guest_atomic(struct kvm_vcpu *vcpu, gpa_t gpa,
 	struct kvm_memory_slot *slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
 	int offset = offset_in_page(gpa);
 
-	return __kvm_read_guest_atomic(vcpu->kvm, slot, gfn, data, offset, len);
+	return __kvm_read_guest_atomic(vcpu->plane, slot, gfn, data, offset, len);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_read_guest_atomic);
 
 /* Copy @len bytes from @data into guest memory at '(@gfn * PAGE_SIZE) + @offset' */
-static int __kvm_write_guest_page(struct kvm *kvm,
+static int __kvm_write_guest_page(struct kvm_plane *plane, struct kvm *kvm,
 				  struct kvm_memory_slot *memslot, gfn_t gfn,
 			          const void *data, int offset, int len)
 {
@@ -3734,7 +3823,7 @@ static int __kvm_write_guest_page(struct kvm *kvm,
 	if (kvm_is_error_hva(addr))
 		return -EFAULT;
 
-	if (!kvm_mem_attributes_may_write_gfn(kvm, gfn))
+	if (!kvm_mem_attributes_may_write(kvm_plane_get_memory_attributes(plane, gfn)))
 		return -EFAULT;
 
 	r = __copy_to_user((void __user *)addr + offset, data, len);
@@ -3749,7 +3838,8 @@ int kvm_write_guest_page(struct kvm *kvm, gfn_t gfn,
 {
 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
 
-	return __kvm_write_guest_page(kvm, slot, gfn, data, offset, len);
+	return __kvm_write_guest_page(kvm->planes[0], kvm, slot, gfn, data,
+				      offset, len);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_write_guest_page);
 
@@ -3758,7 +3848,8 @@ int kvm_vcpu_write_guest_page(struct kvm_vcpu *vcpu, gfn_t gfn,
 {
 	struct kvm_memory_slot *slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
 
-	return __kvm_write_guest_page(vcpu->kvm, slot, gfn, data, offset, len);
+	return __kvm_write_guest_page(vcpu->plane, vcpu->kvm, slot, gfn, data,
+				      offset, len);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_write_guest_page);
 
@@ -5283,6 +5374,17 @@ static long __kvm_plane_ioctl(struct kvm_plane *plane, unsigned int ioctl, unsig
 		break;
 	}
 #endif /* CONFIG_HAVE_KVM_IRQ_ROUTING */
+#ifdef CONFIG_KVM_VM_MEMORY_ATTRIBUTES
+	case KVM_SET_MEMORY_ATTRIBUTES: {
+		void __user *argp = (void __user *)arg;
+		struct kvm_memory_attributes attrs;
+
+		if (copy_from_user(&attrs, argp, sizeof(attrs)))
+			return -EFAULT;
+		r = kvm_vm_ioctl_set_mem_attributes(plane, &attrs);
+		break;
+	}
+#endif
 	default:
 		r = -ENOTTY;
 	}
@@ -6021,7 +6123,7 @@ static long kvm_vm_ioctl(struct file *filp,
 		if (copy_from_user(&attrs, argp, sizeof(attrs)))
 			goto out;
 
-		r = kvm_vm_ioctl_set_mem_attributes(kvm, &attrs);
+		r = kvm_vm_ioctl_set_mem_attributes(kvm->planes[0], &attrs);
 		break;
 	}
 #endif /* CONFIG_KVM_VM_MEMORY_ATTRIBUTES */
