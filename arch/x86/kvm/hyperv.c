@@ -1258,6 +1258,39 @@ static bool hv_tsc_page_gfn(struct kvm_hv *hv, int plane, u64 *gfn)
 	return true;
 }
 
+/* Publish the current parameters to one plane's page: struct first, then sequence. */
+static int hv_publish_tsc_page(struct kvm *kvm, unsigned int plane, u64 gfn)
+{
+	struct kvm_hv *hv = to_kvm_hv(kvm);
+	struct ms_hyperv_tsc_page page = hv->tsc_ref;
+	u32 tsc_seq = page.tsc_sequence;
+
+	/*
+	 * Parameters read back from the plane-0 page under guest TSC
+	 * emulation are plane-0-writable; handing them to a higher plane
+	 * would let the lowest VTL forge that plane's clock.  Publish a
+	 * zero sequence there instead: the plane falls back to the
+	 * TIME_REF_COUNT MSR.
+	 */
+	if (plane && hv->tsc_ref_from_guest)
+		tsc_seq = 0;
+
+	page.tsc_sequence = 0;
+	if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &page, sizeof(page)))
+		return -EFAULT;
+
+	if (!tsc_seq)
+		return 0;
+
+	/* The struct is complete before the sequence makes it valid. */
+	smp_wmb();
+	page.tsc_sequence = tsc_seq;
+	if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &page,
+					sizeof(page.tsc_sequence)))
+		return -EFAULT;
+	return 0;
+}
+
 /* The lowest plane with an enabled page; it owns the sequence number. */
 static bool hv_first_tsc_page_gfn(struct kvm *kvm, u64 *gfn)
 {
@@ -1564,6 +1597,17 @@ static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
 	}
 	case HV_X64_MSR_REFERENCE_TSC: {
 		u64 gfn;
+
+		/* The parameters are valid already: publish them to this page only. */
+		if (!host && hv->hv_tsc_page_status == HV_TSC_PAGE_SET &&
+		    (data & HV_X64_MSR_TSC_REFERENCE_ENABLE)) {
+			/* The caller holds hv_lock. */
+			hv->hv_tsc_page_plane[vcpu->plane_level] = data;
+			gfn = data >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
+			if (hv_publish_tsc_page(kvm, vcpu->plane_level, gfn))
+				hv->hv_tsc_page_status = HV_TSC_PAGE_BROKEN;
+			break;
+		}
 
 		hv->hv_tsc_page_plane[vcpu->plane_level] = data;
 		/* Another plane's page may still be enabled: keep it updated. */
