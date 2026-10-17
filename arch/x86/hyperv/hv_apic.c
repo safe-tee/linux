@@ -125,7 +125,8 @@ static bool __send_ipi_mask_ex(const struct cpumask *mask, int vector,
 		goto ipi_mask_ex_done;
 
 	ipi_arg->vector = vector;
-	ipi_arg->reserved = 0;
+	ipi_arg->in_vtl.as_uint8 = 0;
+	memset(ipi_arg->reserved, 0, sizeof(ipi_arg->reserved));
 	ipi_arg->vp_set.valid_bank_mask = 0;
 
 	/*

@@ -116,8 +116,19 @@ struct kvm_vcpu_hv {
 		u32 vp_id;
 	} nested;
 
+	u64 reg_intercept_control;
+	struct {
+		u32 reg;
+		u8 insn_len;
+		bool pending;
+		u64 base;
+		u32 limit;
+		u64 rip;
+	} reg_intercept;
+
 	u64 vtl_entry_rax;
 	u64 vtl_entry_rcx;
+	bool vtl_entry_regs_valid;
 };
 
 /* "Hv#1" signature */
@@ -210,6 +221,9 @@ static inline bool kvm_hv_hypercall_enabled(struct kvm_vcpu *vcpu)
 }
 
 int kvm_hv_hypercall(struct kvm_vcpu *vcpu);
+bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
+				struct kvm_vcpu *target);
+bool kvm_hv_vtl_entry_blocked(struct kvm_vcpu *target);
 
 void kvm_hv_irq_routing_update(struct kvm *kvm);
 int kvm_hv_synic_set_irq(struct kvm_kernel_irq_routing_entry *e, struct kvm *kvm,

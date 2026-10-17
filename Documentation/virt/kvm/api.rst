@@ -6863,18 +6863,31 @@ a vCPU fd of every plane, not just plane 0.
 :Returns: 0 on success, <0 on error
 
 Reads or sets the per-plane run state of a vCPU:
-KVM_PLANE_RUN_STATE_STOPPED (0) or KVM_PLANE_RUN_STATE_RUNNABLE (1).
+KVM_PLANE_RUN_STATE_STOPPED (0), KVM_PLANE_RUN_STATE_RUNNABLE (1) or
+KVM_PLANE_RUN_STATE_KERNEL_STOPPED (2).
 
 When a vCPU thread calls KVM_RUN, KVM executes the lowest-numbered plane
-whose vCPU is runnable, falling back to plane 0.  A VMM implementing a
-software privilege model (such as Hyper-V VSM) switches planes by
-marking the target plane's vCPU runnable and the current one stopped
-before re-entering KVM_RUN.  Pending events for plane 0 make it runnable
-again on their own only as long as userspace has not explicitly stopped
-it with this ioctl; a VMM-stopped plane 0 keeps its events pending until
-the VMM makes it runnable, so a software privilege model can keep a
-higher plane running undisturbed.  The ioctl is accepted on any plane's
+whose vCPU is runnable, falling back to plane 0.  If no plane is
+runnable and userspace has stopped plane 0, KVM_RUN fails with -EINVAL
+instead of overriding the stop.  A VMM implementing a software privilege
+model (such as Hyper-V VSM) switches planes by marking the target
+plane's vCPU runnable and the current one stopped before re-entering
+KVM_RUN.  Pending events for plane 0 make it runnable again on their own
+only as long as userspace has not explicitly stopped it with this ioctl;
+a VMM-stopped plane 0 keeps its events pending until the VMM makes it
+runnable, so a software privilege model can keep a higher plane running
+undisturbed.  In-kernel plane transitions never override a userspace
+stop: a guest-initiated VTL switch targeting a stopped plane is
+forwarded to userspace instead.  The ioctl is accepted on any plane's
 vCPU fd.
+
+KVM_PLANE_RUN_STATE_KERNEL_STOPPED is reported for a plane that KVM
+itself suspended (such as the lower plane of an in-kernel VTL switch);
+such a plane becomes runnable again on the matching in-kernel transition
+without userspace involvement.  Setting it stops the plane without
+recording a userspace stop, so restoring previously read run states
+round-trips a kernel suspension without converting it into userspace
+stop policy.
 
 The run state is distinct from KVM_GET/SET_MP_STATE, which describes
 the architectural state of a vCPU within its plane.

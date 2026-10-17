@@ -1356,7 +1356,8 @@ struct hv_input_set_vp_registers {
 /* HvCallSendSyntheticClusterIpi hypercall */
 struct hv_send_ipi {	 /* HV_INPUT_SEND_SYNTHETIC_CLUSTER_IPI */
 	u32 vector;
-	u32 reserved;
+	union hv_input_vtl in_vtl;
+	u8 reserved[3];
 	u64 cpu_mask;
 } __packed;
 

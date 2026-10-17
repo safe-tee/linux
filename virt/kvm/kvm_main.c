@@ -5124,9 +5124,14 @@ out_free1:
 		break;
 	}
 	case KVM_GET_PLANE_RUN_STATE: {
-		u32 state = vcpu->plane_state == RUNNABLE ?
-			    KVM_PLANE_RUN_STATE_RUNNABLE :
-			    KVM_PLANE_RUN_STATE_STOPPED;
+		u32 state;
+
+		if (vcpu->plane_state == RUNNABLE)
+			state = KVM_PLANE_RUN_STATE_RUNNABLE;
+		else if (vcpu->plane_user_stopped)
+			state = KVM_PLANE_RUN_STATE_STOPPED;
+		else
+			state = KVM_PLANE_RUN_STATE_KERNEL_STOPPED;
 
 		r = -EINVAL;
 		if (kvm_arch_max_planes(vcpu->kvm) <= 1)
@@ -5153,13 +5158,15 @@ out_free1:
 		if (copy_from_user(&state, argp, sizeof(state)))
 			goto out;
 		r = -EINVAL;
-		if (state > KVM_PLANE_RUN_STATE_RUNNABLE)
+		if (state > KVM_PLANE_RUN_STATE_KERNEL_STOPPED)
 			goto out;
 		if (state == KVM_PLANE_RUN_STATE_RUNNABLE) {
-			vcpu->plane_user_stopped = false;
 			kvm_vcpu_set_plane_runnable(vcpu);
 		} else {
-			vcpu->plane_user_stopped = true;
+			vcpu->plane_user_stopped =
+				state == KVM_PLANE_RUN_STATE_STOPPED;
+			vcpu->plane_kernel_stopped =
+				state == KVM_PLANE_RUN_STATE_KERNEL_STOPPED;
 			kvm_vcpu_set_plane_stopped(vcpu);
 		}
 		r = 0;
@@ -5420,6 +5427,13 @@ static struct file_operations kvm_plane_fops = {
 
 void kvm_vcpu_set_plane_runnable(struct kvm_vcpu *vcpu)
 {
+	/*
+	 * A runnable plane must not carry a stale stop latch: the latches
+	 * gate the plane-0 event wakeup, and KVM_GET_PLANE_RUN_STATE could
+	 * not report the inconsistency.
+	 */
+	vcpu->plane_user_stopped = false;
+	vcpu->plane_kernel_stopped = false;
 	vcpu->plane_state = RUNNABLE;
 	vcpu->common->plane_switch = true;
 	kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
@@ -5450,7 +5464,16 @@ struct kvm_vcpu *kvm_vcpu_select_plane(struct kvm_vcpu *vcpu)
 	}
 
 	if (ret == NULL) {
+		/*
+		 * Never force a userspace-stopped plane 0 to run: it may be
+		 * suspended mid-hypercall, and the VMM owns restarting it.
+		 * KVM_RUN fails instead, surfacing the VMM's ordering bug.
+		 */
 		ret = common->vcpus[0];
+		if (ret->plane_user_stopped)
+			return NULL;
+
+		ret->plane_kernel_stopped = false;
 		ret->plane_state = RUNNABLE;
 	}
 

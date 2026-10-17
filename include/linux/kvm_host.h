@@ -436,8 +436,20 @@ struct kvm_vcpu {
 	 * Set when userspace stopped this plane with
 	 * KVM_SET_PLANE_RUN_STATE: pending plane-0 events then no longer
 	 * make plane 0 runnable on their own, the VMM owns the switch.
+	 * Only the ioctl sets it; in-kernel plane transitions never
+	 * override it, and kvm_vcpu_set_plane_runnable() clears it so a
+	 * runnable plane cannot carry a stale latch.
 	 */
 	bool plane_user_stopped;
+	/*
+	 * Set when an in-kernel VTL switch suspends this plane: plane-0
+	 * events are gated exactly as for a userspace stop, but
+	 * KVM_GET_PLANE_RUN_STATE reports the state as
+	 * KVM_PLANE_RUN_STATE_KERNEL_STOPPED so that a save/restore
+	 * round trip does not convert a transient kernel suspension
+	 * into userspace stop policy.
+	 */
+	bool plane_kernel_stopped;
 
 	/* S390 only */
 	bool valid_wakeup;

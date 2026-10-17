@@ -5681,7 +5681,14 @@ static int handle_desc(struct kvm_vcpu *vcpu)
 	 */
 	BUILD_BUG_ON(KVM_POSSIBLE_CR4_GUEST_BITS & X86_CR4_UMIP);
 
-	WARN_ON_ONCE(!kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP));
+	/*
+	 * Descriptor-table exits are also armed when a higher VTL registers
+	 * DT intercepts (reg_intercept_control); only an exit with neither
+	 * UMIP emulation nor an armed intercept indicates a stale
+	 * SECONDARY_EXEC_DESC control.
+	 */
+	WARN_ON_ONCE(!kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP) &&
+		     !(to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control));
 	return kvm_emulate_instruction(vcpu, 0);
 }
 
@@ -7891,6 +7898,20 @@ void vmx_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 
 	/* Refresh #PF interception to account for MAXPHYADDR changes. */
 	vmx_update_exception_bitmap(vcpu);
+
+	/*
+	 * Trap descriptor-table instructions when a higher VTL armed
+	 * register intercepts on them, and stop trapping when the
+	 * intercepts are disarmed.  Preserve the control when UMIP
+	 * emulation needs it (CR4.UMIP owns it then).
+	 */
+	if (vmcs_config.cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_DESC) {
+		if (to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control)
+			secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_DESC);
+		else if (!(vmx_umip_emulated() &&
+			   kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP)))
+			secondary_exec_controls_clearbit(vmx, SECONDARY_EXEC_DESC);
+	}
 }
 
 static __init u64 vmx_get_perf_capabilities(void)
