@@ -3592,6 +3592,42 @@ bool vmx_is_valid_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 	return true;
 }
 
+/*
+ * SECONDARY_EXEC_DESC has two consumers: UMIP emulation (descriptor-table
+ * reads must #GP when CR4.UMIP is set and the CPU cannot do it) and the
+ * Hyper-V VTL register intercepts (descriptor-table writes divert into
+ * KVM_EXIT_HYPERV_REG_INTERCEPT, see hv_divert_dt_write()).  Every arm or
+ * disarm of the control for one consumer must preserve the other's claim.
+ */
+static bool vmx_need_desc_exiting(struct kvm_vcpu *vcpu)
+{
+	return (vmx_umip_emulated() &&
+		kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP)) ||
+	       kvm_hv_dt_intercepts_armed(vcpu);
+}
+
+int vmx_update_hv_reg_intercepts(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+	if (!(vmcs_config.cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_DESC))
+		return 0;
+
+	/*
+	 * Only vmcs01 carries the register intercepts: prepare_vmcs02()
+	 * strips SECONDARY_EXEC_DESC unless vmcs12 or L2's UMIP emulation
+	 * wants it, so an L2 descriptor load is never diverted.  While
+	 * vmcs02 is loaded, leave it alone; nested_vmx_vmexit() refreshes
+	 * vmcs01 after switching back.
+	 */
+	if (vmx->loaded_vmcs != &vmx->vmcs01)
+		return 0;
+
+	secondary_exec_controls_changebit(vmx, SECONDARY_EXEC_DESC,
+					  vmx_need_desc_exiting(vcpu));
+	return 0;
+}
+
 void vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 {
 	unsigned long old_cr4 = kvm_read_cr4(vcpu);
@@ -3615,8 +3651,16 @@ void vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 		if (cr4 & X86_CR4_UMIP) {
 			secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_DESC);
 			hw_cr4 &= ~X86_CR4_UMIP;
-		} else if (!is_guest_mode(vcpu) ||
-			!nested_cpu_has2(get_vmcs12(vcpu), SECONDARY_EXEC_DESC)) {
+		} else if (is_guest_mode(vcpu)) {
+			if (!nested_cpu_has2(get_vmcs12(vcpu), SECONDARY_EXEC_DESC))
+				secondary_exec_controls_clearbit(vmx,
+								 SECONDARY_EXEC_DESC);
+		} else if (!kvm_hv_dt_intercepts_armed(vcpu)) {
+			/*
+			 * Clearing CR4.UMIP must not disarm the control
+			 * while a higher VTL holds register intercepts on
+			 * the descriptor tables.
+			 */
 			secondary_exec_controls_clearbit(vmx, SECONDARY_EXEC_DESC);
 		}
 	}
@@ -5689,7 +5733,7 @@ static int handle_desc(struct kvm_vcpu *vcpu)
 	 * SECONDARY_EXEC_DESC control.
 	 */
 	WARN_ON_ONCE(!kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP) &&
-		     !(to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control));
+		     !kvm_hv_dt_intercepts_armed(vcpu));
 	return kvm_emulate_instruction(vcpu, 0);
 }
 
@@ -7952,18 +7996,11 @@ void vmx_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 	vmx_update_exception_bitmap(vcpu);
 
 	/*
-	 * Trap descriptor-table instructions when a higher VTL armed
-	 * register intercepts on them, and stop trapping when the
-	 * intercepts are disarmed.  Preserve the control when UMIP
-	 * emulation needs it (CR4.UMIP owns it then).
+	 * Setting the secondary exec controls above recomputed them from
+	 * scratch; re-arm descriptor-table exiting for the VTL register
+	 * intercepts and UMIP emulation.
 	 */
-	if (vmcs_config.cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_DESC) {
-		if (to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control)
-			secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_DESC);
-		else if (!(vmx_umip_emulated() &&
-			   kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP)))
-			secondary_exec_controls_clearbit(vmx, SECONDARY_EXEC_DESC);
-	}
+	vmx_update_hv_reg_intercepts(vcpu);
 }
 
 static __init u64 vmx_get_perf_capabilities(void)

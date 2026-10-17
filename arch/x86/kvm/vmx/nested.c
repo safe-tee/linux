@@ -5171,6 +5171,7 @@ void __nested_vmx_vmexit(struct kvm_vcpu *vcpu, u32 vm_exit_reason,
 	 * Update any VMCS fields that might have changed while vmcs02 was the
 	 * active VMCS.  The tracking is per-vCPU, not per-VMCS.
 	 */
+	vmx_update_hv_reg_intercepts(vcpu);
 	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, vmx->msr_autostore.nr);
 	vmcs_write32(VM_EXIT_MSR_LOAD_COUNT, vmx->msr_autoload.host.nr);
 	vmcs_write32(VM_ENTRY_MSR_LOAD_COUNT, vmx->msr_autoload.guest.nr);

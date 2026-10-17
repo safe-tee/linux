@@ -1805,6 +1805,13 @@ struct kvm_x86_ops {
 	bool (*apic_init_signal_blocked)(struct kvm_vcpu *vcpu);
 	int (*enable_l2_tlb_flush)(struct kvm_vcpu *vcpu);
 
+	/*
+	 * Bring the L1 (vmcs01/vmcb01) descriptor-table intercepts in line
+	 * with hv_vcpu->reg_intercept_control.  Never touches L2 controls;
+	 * safe to call at any point, including with a vCPU in guest mode.
+	 */
+	int (*update_hv_reg_intercepts)(struct kvm_vcpu *vcpu);
+
 	void (*migrate_timers)(struct kvm_vcpu *vcpu);
 	void (*recalc_intercepts)(struct kvm_vcpu *vcpu);
 	int (*complete_emulated_msr)(struct kvm_vcpu *vcpu, int err);

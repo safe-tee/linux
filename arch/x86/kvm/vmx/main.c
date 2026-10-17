@@ -211,6 +211,15 @@ static void vt_recalc_intercepts(struct kvm_vcpu *vcpu)
 	vmx_recalc_intercepts(vcpu);
 }
 
+static int vt_update_hv_reg_intercepts(struct kvm_vcpu *vcpu)
+{
+	/* TDX doesn't allow descriptor-table loads to be intercepted. */
+	if (is_td_vcpu(vcpu))
+		return -EINVAL;
+
+	return vmx_update_hv_reg_intercepts(vcpu);
+}
+
 static int vt_complete_emulated_msr(struct kvm_vcpu *vcpu, int err)
 {
 	if (is_td_vcpu(vcpu))
@@ -1147,6 +1156,7 @@ struct kvm_x86_ops vt_x86_ops __initdata = {
 
 	.check_emulate_instruction = vt_op(check_emulate_instruction),
 	.apic_init_signal_blocked = vt_op(apic_init_signal_blocked),
+	.update_hv_reg_intercepts = vt_op(update_hv_reg_intercepts),
 	.migrate_timers = vmx_migrate_timers,
 
 	.recalc_intercepts = vt_op(recalc_intercepts),

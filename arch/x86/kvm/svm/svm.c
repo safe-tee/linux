@@ -2149,6 +2149,17 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 	return rc;
 }
 
+static int desc_interception(struct kvm_vcpu *vcpu)
+{
+	/*
+	 * Descriptor-table write exits are armed only while a higher VTL
+	 * has register intercepts on them (reg_intercept_control); the
+	 * emulator diverts the write into a register-intercept exit via
+	 * hv_divert_dt_write() instead of applying it.
+	 */
+	return kvm_emulate_instruction(vcpu, 0);
+}
+
 static int db_interception(struct kvm_vcpu *vcpu)
 {
 	struct kvm_run *kvm_run = vcpu->run;
@@ -3518,6 +3529,10 @@ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_WRITE_CR3]			= cr_interception,
 	[SVM_EXIT_WRITE_CR4]			= cr_interception,
 	[SVM_EXIT_WRITE_CR8]			= cr8_write_interception,
+	[SVM_EXIT_IDTR_WRITE]			= desc_interception,
+	[SVM_EXIT_GDTR_WRITE]			= desc_interception,
+	[SVM_EXIT_LDTR_WRITE]			= desc_interception,
+	[SVM_EXIT_TR_WRITE]			= desc_interception,
 	[SVM_EXIT_READ_DR0]			= dr_interception,
 	[SVM_EXIT_READ_DR1]			= dr_interception,
 	[SVM_EXIT_READ_DR2]			= dr_interception,
@@ -4962,6 +4977,49 @@ static bool svm_has_emulated_msr(struct kvm *kvm, u32 index)
 	return true;
 }
 
+static int svm_update_hv_reg_intercepts(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	/*
+	 * Trap descriptor-table loads while a higher VTL has register
+	 * intercepts armed on them (reg_intercept_control), and stop
+	 * trapping when they are disarmed; the emulator diverts a trapped
+	 * load into a register-intercept exit (hv_divert_dt_write()).
+	 * VMX arms the all-or-nothing SECONDARY_EXEC_DESC; the SVM
+	 * intercepts are per-register but armed as a block to match, and
+	 * an exit the emulator does not divert applies the load normally.
+	 *
+	 * The intercepts are armed in vmcb01 only: an L2 descriptor load
+	 * is never diverted, and nested_vmcb02_recalc_intercepts() keeps
+	 * these bits out of vmcb02 unless L1 asked for them itself.
+	 */
+	if (kvm_hv_dt_intercepts_armed(vcpu)) {
+		/*
+		 * The diverted load needs full emulation, which encrypted
+		 * guests cannot have: on SEV-ES and SNP the emulator cannot
+		 * read the registers, so svm_check_emulate_instruction()
+		 * retries at the same RIP with the intercept still armed and
+		 * every descriptor-table load livelocks the vCPU; on plain
+		 * SEV there are no instruction bytes to decode and a valid
+		 * lgdt takes a spurious #UD.  Refuse to arm.
+		 */
+		if (is_sev_guest(vcpu))
+			return -EINVAL;
+
+		svm_set_intercept(svm, INTERCEPT_LOAD_IDTR);
+		svm_set_intercept(svm, INTERCEPT_LOAD_GDTR);
+		svm_set_intercept(svm, INTERCEPT_LOAD_LDTR);
+		svm_set_intercept(svm, INTERCEPT_LOAD_TR);
+	} else {
+		svm_clr_intercept(svm, INTERCEPT_LOAD_IDTR);
+		svm_clr_intercept(svm, INTERCEPT_LOAD_GDTR);
+		svm_clr_intercept(svm, INTERCEPT_LOAD_LDTR);
+		svm_clr_intercept(svm, INTERCEPT_LOAD_TR);
+	}
+	return 0;
+}
+
 static void svm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_svm *svm = to_svm(vcpu);
@@ -4987,6 +5045,13 @@ static void svm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 	 */
 	if (guest_cpuid_is_intel_compatible(vcpu))
 		guest_cpu_cap_clear(vcpu->common, X86_FEATURE_V_VMSAVE_VMLOAD);
+
+	/*
+	 * Re-arm the descriptor-table intercepts; setting guest CPUID does
+	 * not change reg_intercept_control, but keep the controls in sync
+	 * the same way vmx_vcpu_after_set_cpuid() does.
+	 */
+	svm_update_hv_reg_intercepts(vcpu);
 
 	if (is_sev_guest(vcpu))
 		sev_vcpu_after_set_cpuid(svm);
@@ -5728,6 +5793,7 @@ struct kvm_x86_ops svm_x86_ops __initdata = {
 	.apic_init_signal_blocked = svm_apic_init_signal_blocked,
 
 	.recalc_intercepts = svm_recalc_intercepts,
+	.update_hv_reg_intercepts = svm_update_hv_reg_intercepts,
 	.complete_emulated_msr = svm_complete_emulated_msr,
 
 	.vcpu_deliver_sipi_vector = svm_vcpu_deliver_sipi_vector,

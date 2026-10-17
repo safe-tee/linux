@@ -172,6 +172,22 @@ void nested_vmcb02_recalc_intercepts(struct vcpu_svm *svm)
 	for (i = 0; i < MAX_INTERCEPT; i++)
 		vmcb02->control.intercepts[i] |= vmcb12_ctrl->intercepts[i];
 
+	/*
+	 * KVM arms the descriptor-table load intercepts in vmcb01 to divert
+	 * L1's loads into Hyper-V register-intercept exits (see
+	 * hv_divert_dt_write()); they do not apply to L2.  Drop them from
+	 * vmcb02 unless L1 wants the intercept itself, matching the
+	 * SECONDARY_EXEC_DESC strip in VMX's prepare_vmcs02().
+	 */
+	if (!vmcb12_is_intercept(vmcb12_ctrl, INTERCEPT_LOAD_IDTR))
+		vmcb_clr_intercept(&vmcb02->control, INTERCEPT_LOAD_IDTR);
+	if (!vmcb12_is_intercept(vmcb12_ctrl, INTERCEPT_LOAD_GDTR))
+		vmcb_clr_intercept(&vmcb02->control, INTERCEPT_LOAD_GDTR);
+	if (!vmcb12_is_intercept(vmcb12_ctrl, INTERCEPT_LOAD_LDTR))
+		vmcb_clr_intercept(&vmcb02->control, INTERCEPT_LOAD_LDTR);
+	if (!vmcb12_is_intercept(vmcb12_ctrl, INTERCEPT_LOAD_TR))
+		vmcb_clr_intercept(&vmcb02->control, INTERCEPT_LOAD_TR);
+
 	/* If SMI is not intercepted, ignore guest SMI intercept as well  */
 	if (!intercept_smi)
 		vmcb_clr_intercept(&vmcb02->control, INTERCEPT_SMI);

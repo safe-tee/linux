@@ -367,6 +367,18 @@ static inline bool kvm_hv_vcpu_suspended(struct kvm_vcpu *vcpu)
 	       READ_ONCE(vcpu->arch.hyperv->suspended);
 }
 
+/*
+ * True when a higher VTL armed descriptor-table write intercepts
+ * (HvRegisterCrInterceptControl) on this vCPU, i.e. when the vendor code
+ * must trap the L1 guest's descriptor-table loads for hv_divert_dt_write().
+ */
+static inline bool kvm_hv_dt_intercepts_armed(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
+
+	return hv_vcpu && hv_vcpu->reg_intercept_control;
+}
+
 static inline bool kvm_hv_is_tlb_flush_hcall(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
@@ -457,6 +469,10 @@ static inline bool kvm_hv_vcpu_suspended(struct kvm_vcpu *vcpu)
 static inline int kvm_hv_verify_vp_assist(struct kvm_vcpu *vcpu)
 {
 	return 0;
+}
+static inline bool kvm_hv_dt_intercepts_armed(struct kvm_vcpu *vcpu)
+{
+	return false;
 }
 static inline u32 kvm_hv_get_vpindex(struct kvm_vcpu *vcpu)
 {

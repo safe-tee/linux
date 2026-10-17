@@ -3569,9 +3569,16 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 			return r;
 		hv_vcpu = to_hv_vcpu(vcpu);
 		hv_vcpu->reg_intercept_control = cap->args[0];
-		/* Refresh the descriptor-table exiting controls. */
-		kvm_x86_call(vcpu_after_set_cpuid)(vcpu);
-		return 0;
+		/*
+		 * Refresh the descriptor-table exiting controls.  The vendor
+		 * op touches only the L1 controls, so it is safe here even
+		 * when the vCPU last exited from a nested guest and
+		 * vcpu_load() restored vmcs02/vmcb02.
+		 */
+		r = kvm_x86_call(update_hv_reg_intercepts)(vcpu);
+		if (r)
+			hv_vcpu->reg_intercept_control = 0;
+		return r;
 	}
 	case KVM_CAP_HYPERV_DIRECT_TLBFLUSH:
 		if (!kvm_x86_ops.enable_l2_tlb_flush)
@@ -5866,7 +5873,9 @@ static void emulator_get_idt(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt)
 /*
  * Divert a descriptor-table write into a register-intercept exit when the
  * higher VTL armed one: the write is not applied, and userspace delivers
- * the TLFS register-intercept message to the higher VTL.
+ * the TLFS register-intercept message to the higher VTL.  The intercept
+ * contract covers only the L1 guest; a descriptor load emulated on behalf
+ * of a nested (L2) guest, however its exit arrived, is applied normally.
  */
 static bool hv_divert_dt_write(struct x86_emulate_ctxt *ctxt, u32 hv_reg,
 			       const struct desc_ptr *dt, u64 ctl_bit)
@@ -5875,7 +5884,7 @@ static bool hv_divert_dt_write(struct x86_emulate_ctxt *ctxt, u32 hv_reg,
 	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
 
-	if (!hv_vcpu || vcpu->plane_level ||
+	if (!hv_vcpu || vcpu->plane_level || is_guest_mode(vcpu) ||
 	    !(hv_vcpu->reg_intercept_control & ctl_bit))
 		return false;
 
