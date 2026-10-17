@@ -9250,6 +9250,32 @@ This capability must be enabled before any vCPU or extra plane has been
 created, and the chosen count cannot be changed afterwards; otherwise
 -EEXIST is returned.
 
+7.49 KVM_CAP_HYPERV_FORWARD_HCALL
+---------------------------------
+
+:Architectures: x86
+:Target: VM
+:Parameters: args[0] is 1 to enable forwarding, 0 to disable it
+
+When enabled, a Hyper-V hypercall that KVM would otherwise have failed
+with HV_STATUS_INVALID_HYPERCALL_CODE instead exits to userspace with
+KVM_EXIT_HYPERV_HCALL, and extended hypercalls in fast form exit the
+same way instead of failing with HV_STATUS_INVALID_PARAMETER.  This
+lets a VMM implement hypercalls KVM does not know, such as the Hyper-V
+VSM set.  The synthetic-debugger hypercalls (HvCallResetDebugSession,
+HvCallPostDebugData, HvCallRetrieveDebugData) are an exception: while
+the synthetic debugger is not enabled they still fail in KVM with
+HV_STATUS_INVALID_HYPERCALL_CODE and are not forwarded.
+
+The exit carries the control value and the input and output parameters
+(for fast hypercalls, RDX and R8 from a 64-bit caller, or the EBX:ECX
+and EDI:ESI pairs from a 32-bit caller).  Register argument and
+return state of fast hypercalls, such as the XMM registers, is read and
+written with the ordinary vCPU state ioctls before resuming the vCPU
+with ``hyperv.u.hcall.result`` set.  Hypercalls KVM implements itself,
+and the ordering of CPUID-enforcement checks against hypercall
+dispatch, are unaffected.
+
 8. Other capabilities.
 ======================
 

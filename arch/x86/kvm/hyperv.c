@@ -2692,12 +2692,15 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 		goto hypercall_userspace_exit;
 	}
 	case HV_EXT_CALL_QUERY_CAPABILITIES ... HV_EXT_CALL_MAX:
-		if (unlikely(hc.fast)) {
+		if (unlikely(hc.fast) &&
+		    !to_kvm_hv(vcpu->kvm)->hv_forward_hcalls) {
 			ret = HV_STATUS_INVALID_PARAMETER;
 			break;
 		}
 		goto hypercall_userspace_exit;
 	default:
+		if (to_kvm_hv(vcpu->kvm)->hv_forward_hcalls)
+			goto hypercall_userspace_exit;
 		ret = HV_STATUS_INVALID_HYPERCALL_CODE;
 		break;
 	}

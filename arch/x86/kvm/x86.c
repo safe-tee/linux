@@ -2314,6 +2314,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_HYPERV_CPUID:
 	case KVM_CAP_HYPERV_ENFORCE_CPUID:
 	case KVM_CAP_SYS_HYPERV_CPUID:
+	case KVM_CAP_HYPERV_FORWARD_HCALL:
 #endif
 	case KVM_CAP_PCI_SEGMENT:
 	case KVM_CAP_DEBUGREGS:
@@ -4137,6 +4138,15 @@ planes_unlock:
 		mutex_unlock(&kvm->lock);
 		break;
 	}
+#ifdef CONFIG_KVM_HYPERV
+	case KVM_CAP_HYPERV_FORWARD_HCALL:
+		r = -EINVAL;
+		if (cap->args[0] & ~1ULL)
+			break;
+		to_kvm_hv(kvm)->hv_forward_hcalls = !!cap->args[0];
+		r = 0;
+		break;
+#endif
 	case KVM_CAP_X2APIC_API:
 		r = -EINVAL;
 		if (cap->args[0] & ~KVM_X2APIC_API_VALID_FLAGS)
