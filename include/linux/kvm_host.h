@@ -163,6 +163,12 @@ static inline bool kvm_is_error_gpa(gpa_t gpa)
 #define KVM_REQUEST_NO_WAKEUP      BIT(8)
 #define KVM_REQUEST_WAIT           BIT(9)
 #define KVM_REQUEST_NO_ACTION      BIT(10)
+/*
+ * A KVM_REQUEST_PER_PLANE request has two scopes: raised through
+ * kvm_make_vcpu_request() (kicks, mass requests) it fans out to every
+ * plane twin of the vCPU, while a direct kvm_make_request() marks only
+ * the twin it was given.  A direct caller must pick the twin it means.
+ */
 #define KVM_REQUEST_PER_PLANE      BIT(11)
 /*
  * Architecture-independent vcpu->requests bit members
@@ -409,9 +415,14 @@ struct kvm_vcpu_common {
 	struct kvm_vcpu_arch_common arch;
 };
 
+/*
+ * The slot read pairs with the smp_store_release() publication in
+ * kvm_vcpu_finish_common() for iterators running outside the locks that
+ * serialise twin creation.
+ */
 #define vcpu_for_each_plane(common, i, v)			\
 	for ((i) = 0; (i) < KVM_MAX_PLANES; ++(i))		\
-		if (((v) = common->vcpus[(i)]) != NULL)
+		if (((v) = READ_ONCE(common->vcpus[(i)])) != NULL)
 
 /* Tracked per plane-VCPU - used for deciding which plane-vcpu to run */
 enum kvm_vcpu_state {

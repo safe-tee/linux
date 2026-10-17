@@ -568,7 +568,13 @@ out_drop_counter:
 static void kvm_vcpu_finish_common(struct kvm_vcpu *vcpu)
 {
 	WARN_ON(vcpu->common->vcpus[vcpu->plane_level] != NULL);
-	vcpu->common->vcpus[vcpu->plane_level] = vcpu;
+	/*
+	 * Publish with release semantics so the lockless twin readers
+	 * (the kick paths, vcpu_for_each_plane, the hyperv twin lookups)
+	 * observe a fully initialised vCPU through their READ_ONCE of the
+	 * slot; the plain store relied on x86-TSO.
+	 */
+	smp_store_release(&vcpu->common->vcpus[vcpu->plane_level], vcpu);
 	smp_wmb();
 	if (vcpu->plane_level == 0) {
 		/*
