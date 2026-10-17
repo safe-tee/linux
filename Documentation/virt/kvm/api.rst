@@ -6838,6 +6838,32 @@ in the future may use the plane id when planes are supported by hardware (as is
 the case for VMPLs in AMD), or if KVM supports accelerated plane switch
 operations (as might be the case for Hyper-V VTLs).
 
+4.146 KVM_GET_PLANE_RUN_STATE / KVM_SET_PLANE_RUN_STATE
+--------------------------------------------------------
+
+:Capability: KVM_CAP_PLANES
+:Architectures: x86
+:Type: vcpu ioctl
+:Parameters: pointer to a __u32 run state
+:Returns: 0 on success, <0 on error
+
+Reads or sets the per-plane run state of a vCPU:
+KVM_PLANE_RUN_STATE_STOPPED (0) or KVM_PLANE_RUN_STATE_RUNNABLE (1).
+
+When a vCPU thread calls KVM_RUN, KVM executes the lowest-numbered plane
+whose vCPU is runnable, falling back to plane 0.  A VMM implementing a
+software privilege model (such as Hyper-V VSM) switches planes by
+marking the target plane's vCPU runnable and the current one stopped
+before re-entering KVM_RUN.  Pending events for plane 0 make it runnable
+again on their own only as long as userspace has not explicitly stopped
+it with this ioctl; a VMM-stopped plane 0 keeps its events pending until
+the VMM makes it runnable, so a software privilege model can keep a
+higher plane running undisturbed.  The ioctl is accepted on any plane's
+vCPU fd.
+
+The run state is distinct from KVM_GET/SET_MP_STATE, which describes
+the architectural state of a vCPU within its plane.
+
 5. The kvm_run structure
 ========================
 

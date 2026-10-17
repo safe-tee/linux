@@ -422,6 +422,12 @@ struct kvm_vcpu {
 
 	u64 plane_requests;
 	enum kvm_vcpu_state plane_state;
+	/*
+	 * Set when userspace stopped this plane with
+	 * KVM_SET_PLANE_RUN_STATE: pending plane-0 events then no longer
+	 * make plane 0 runnable on their own, the VMM owns the switch.
+	 */
+	bool plane_user_stopped;
 
 	/* S390 only */
 	bool valid_wakeup;

@@ -4712,6 +4712,8 @@ static inline bool kvm_is_vcpu_plane_ioctl(unsigned ioctl)
 	case KVM_GET_SREGS:
 	case KVM_SET_SREGS:
 	case KVM_TRANSLATE:
+	case KVM_GET_PLANE_RUN_STATE:
+	case KVM_SET_PLANE_RUN_STATE:
 		return true;
 	default:
 		return kvm_arch_is_vcpu_plane_ioctl(ioctl);
@@ -4850,6 +4852,48 @@ out_free1:
 			goto out;
 		}
 		r = kvm_arch_vcpu_ioctl_set_sregs(vcpu, kvm_sregs);
+		break;
+	}
+	case KVM_GET_PLANE_RUN_STATE: {
+		u32 state = vcpu->plane_state == RUNNABLE ?
+			    KVM_PLANE_RUN_STATE_RUNNABLE :
+			    KVM_PLANE_RUN_STATE_STOPPED;
+
+		r = -EINVAL;
+		if (kvm_arch_max_planes(vcpu->kvm) <= 1)
+			goto out;
+		r = -EFAULT;
+		if (copy_to_user(argp, &state, sizeof(state)))
+			goto out;
+		r = 0;
+		break;
+	}
+	case KVM_SET_PLANE_RUN_STATE: {
+		u32 state;
+
+		/*
+		 * KVM_SET_PLANE_RUN_STATE raises KVM_REQ_PLANE_RESCHED,
+		 * which only plane-aware architecture code consumes; on a
+		 * planes-less VM the stuck request would abort every guest
+		 * entry and spin KVM_RUN at 100%.
+		 */
+		r = -EINVAL;
+		if (kvm_arch_max_planes(vcpu->kvm) <= 1)
+			goto out;
+		r = -EFAULT;
+		if (copy_from_user(&state, argp, sizeof(state)))
+			goto out;
+		r = -EINVAL;
+		if (state > KVM_PLANE_RUN_STATE_RUNNABLE)
+			goto out;
+		if (state == KVM_PLANE_RUN_STATE_RUNNABLE) {
+			vcpu->plane_user_stopped = false;
+			kvm_vcpu_set_plane_runnable(vcpu);
+		} else {
+			vcpu->plane_user_stopped = true;
+			kvm_vcpu_set_plane_stopped(vcpu);
+		}
+		r = 0;
 		break;
 	}
 	case KVM_GET_MP_STATE: {
