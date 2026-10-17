@@ -580,7 +580,20 @@ static int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,
 #ifdef CONFIG_KVM_XEN
 		v->arch.xen.cpuid = kvm_get_hypervisor_cpuid(vcpu, XEN_SIGNATURE);
 #endif
+		/*
+		 * The ioctl loaded the calling vCPU; updating a twin's
+		 * VMCS/VMCB controls requires that twin to be the loaded
+		 * one, so swap it in around the update.
+		 */
+		if (v != vcpu) {
+			vcpu_put(vcpu);
+			vcpu_load(v);
+		}
 		kvm_vcpu_after_set_cpuid(v);
+		if (v != vcpu) {
+			vcpu_put(v);
+			vcpu_load(vcpu);
+		}
 	}
 
 success:
