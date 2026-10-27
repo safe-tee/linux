@@ -2094,7 +2094,7 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 	    (vcpu->run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE_PROT)) {
 		unsigned int len = 0;
 
-		if (static_cpu_has(X86_FEATURE_DECODEASSISTS) &&
+		if (cpu_feature_enabled(X86_FEATURE_DECODEASSISTS) &&
 		    svm->vmcb->control.insn_len &&
 		    x86_decode_emulated_instruction(vcpu, 0,
 						    svm->vmcb->control.insn_bytes,
