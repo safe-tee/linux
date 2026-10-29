@@ -5884,7 +5884,7 @@ static bool hv_divert_dt_write(struct x86_emulate_ctxt *ctxt, u32 hv_reg,
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
 
 	if (!hv_vcpu || vcpu->plane_level || is_guest_mode(vcpu) ||
-	    !(hv_vcpu->reg_intercept_control & ctl_bit))
+	    is_smm(vcpu) || !(hv_vcpu->reg_intercept_control & ctl_bit))
 		return false;
 
 	hv_vcpu->reg_intercept.reg = hv_reg;
